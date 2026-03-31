@@ -1,0 +1,468 @@
+:root {
+    color-scheme: dark;
+    --background: #0b1220;
+    --surface: #121b2e;
+    --surface-2: #18243c;
+    --border: #2a3958;
+    --text: #ecf2ff;
+    --muted: #a4b2cf;
+    --primary: #5b8cff;
+    --primary-hover: #4f7df0;
+    --success: #1f9d62;
+    --warning: #b78103;
+    --danger: #cf3f5b;
+    --shadow: 0 12px 30px rgba(0, 0, 0, 0.18);
+  }
+  
+  * {
+    box-sizing: border-box;
+  }
+  
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+    background: var(--background);
+    color: var(--text);
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  
+  a {
+    color: var(--primary);
+    text-decoration: none;
+  }
+  
+  a:hover {
+    text-decoration: underline;
+  }
+  
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+  
+  button {
+    cursor: pointer;
+  }
+  
+  main {
+    padding: 24px 0 48px;
+  }
+  
+  .container {
+    width: min(1120px, calc(100% - 32px));
+    margin: 0 auto;
+  }
+  
+  .page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  
+  .page-header h1,
+  .page-header h2,
+  .page-header h3,
+  .card h1,
+  .card h2,
+  .card h3 {
+    margin: 0 0 8px;
+  }
+  
+  .page-header p,
+  .card p {
+    margin: 0;
+  }
+  
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    padding: 20px;
+  }
+  
+  .narrow-card {
+    width: min(520px, 100%);
+    margin: 0 auto;
+  }
+  
+  .form-card,
+  .auth-card,
+  .profile-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  
+  .form {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  
+  .form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .form-field span {
+    font-size: 14px;
+    color: var(--muted);
+  }
+  
+  input,
+  textarea {
+    width: 100%;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    border-radius: 12px;
+    padding: 12px 14px;
+    outline: none;
+  }
+  
+  input:focus,
+  textarea:focus {
+    border-color: var(--primary);
+  }
+  
+  .button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: none;
+    border-radius: 12px;
+    padding: 12px 16px;
+    background: var(--primary);
+    color: white;
+    font-weight: 600;
+  }
+  
+  .button:hover {
+    background: var(--primary-hover);
+    text-decoration: none;
+  }
+  
+  .button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+  }
+  
+  .button-secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  
+  .button-secondary:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+  
+  .button-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  
+  .alert {
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 14px;
+  }
+  
+  .alert-error {
+    background: rgba(207, 63, 91, 0.15);
+    border: 1px solid rgba(207, 63, 91, 0.45);
+  }
+  
+  .alert-success {
+    background: rgba(31, 157, 98, 0.15);
+    border: 1px solid rgba(31, 157, 98, 0.45);
+  }
+  
+  .muted {
+    color: var(--muted);
+  }
+  
+  .stack-sm {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .stack-lg {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  
+  .cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+  }
+  
+  .data-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+  }
+  
+  .compact-grid {
+    margin-top: 8px;
+  }
+  
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+  }
+  
+  .summary-item,
+  .data-grid > div,
+  .structured-object-item {
+    padding: 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  
+  .label {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 92px;
+    padding: 8px 10px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  
+  .badge-default {
+    background: rgba(255, 255, 255, 0.08);
+  }
+  
+  .badge-success {
+    background: rgba(31, 157, 98, 0.18);
+    color: #8ef0c0;
+  }
+  
+  .badge-warning {
+    background: rgba(183, 129, 3, 0.18);
+    color: #ffd676;
+  }
+  
+  .badge-danger {
+    background: rgba(207, 63, 91, 0.18);
+    color: #ff93a7;
+  }
+  
+  .navbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: rgba(11, 18, 32, 0.88);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(14px);
+  }
+  
+  .navbar-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 16px 0;
+  }
+  
+  .navbar-brand {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+  }
+  
+  .navbar-links {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  
+  .navbar-links a {
+    color: var(--muted);
+    font-weight: 600;
+  }
+  
+  .navbar-links a.active {
+    color: var(--text);
+  }
+  
+  .navbar-user {
+    color: var(--muted);
+    font-size: 14px;
+  }
+  
+  .tender-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  
+  .tender-card-top,
+  .status-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  
+  .card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: auto;
+  }
+  
+  .file-list,
+  .document-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  
+  .file-list-item,
+  .document-item {
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+  
+  .document-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  
+  .document-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 13px;
+  }
+  
+  .state-message {
+    padding: 18px;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+  
+  .tone-success {
+    border-color: rgba(31, 157, 98, 0.5);
+  }
+  
+  .tone-warning {
+    border-color: rgba(183, 129, 3, 0.5);
+  }
+  
+  .tone-danger {
+    border-color: rgba(207, 63, 91, 0.5);
+  }
+  
+  .top-border {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  
+  .section-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .structured-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-left: 20px;
+    margin: 0;
+  }
+  
+  .structured-list > li {
+    line-height: 1.6;
+  }
+  
+  .structured-object {
+    display: grid;
+    gap: 12px;
+  }
+  
+  .tabs {
+    display: inline-flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  
+  .tab-button {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 10px 14px;
+    font-weight: 600;
+  }
+  
+  .tab-button.active {
+    background: rgba(91, 140, 255, 0.18);
+    color: var(--text);
+    border-color: rgba(91, 140, 255, 0.45);
+  }
+  
+  .json-block {
+    overflow-x: auto;
+    border-radius: 12px;
+    background: #0d1526;
+    border: 1px solid var(--border);
+    padding: 14px;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  
+  @media (max-width: 900px) {
+    .navbar-inner {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  
+    .status-header,
+    .tender-card-top,
+    .page-header {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  
+    .file-list-item {
+      flex-direction: column;
+      align-items: flex-start;
+    }
+  }

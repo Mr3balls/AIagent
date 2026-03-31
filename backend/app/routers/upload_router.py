@@ -1,3 +1,4 @@
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -5,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Tender, TenderDocument
+from app.models import Tender, TenderDocument, User
 from app.schemas import TenderDocumentResponse, TenderUploadResponse
+from app.security import get_current_user
 from app.services.file_service import FileService
 
 router = APIRouter(prefix="/tenders", tags=["tender-documents"])
@@ -21,9 +23,10 @@ def upload_tender_documents(
     tender_id: UUID,
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
+    current_user: Annotated[User, Depends(get_current_user)] = None,
 ) -> TenderUploadResponse:
     tender = db.execute(
-        select(Tender).where(Tender.id == tender_id)
+        select(Tender).where(Tender.id == tender_id, Tender.owner_id == current_user.id)
     ).scalar_one_or_none()
 
     if tender is None:

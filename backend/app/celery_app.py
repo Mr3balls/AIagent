@@ -8,6 +8,7 @@ celery_app = Celery(
     "tender_ai_worker",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    include=["app.tasks.tender_analysis"],
 )
 
 celery_app.conf.update(
@@ -16,4 +17,6 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="Asia/Almaty",
     enable_utc=True,
+    imports=("app.tasks.tender_analysis",),
+    broker_connection_retry_on_startup=True,
 )

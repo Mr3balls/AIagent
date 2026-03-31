@@ -7,8 +7,11 @@ pydantic-settings==2.7.1
 celery==5.4.0
 redis==5.2.1
 python-multipart==0.0.20
-openai>=1.68.0
 requests==2.32.3
+pwdlib[argon2]
+PyJWT
+email-validator
+openai>=1.68.0
 pdfplumber==0.11.5
 pymupdf==1.25.3
 python-docx==1.1.2

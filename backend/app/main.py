@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import Base, engine
 from app.routers.analyze_router import router as analyze_router
+from app.routers.auth import router as auth_router
 from app.routers.tenders import router as tenders_router
 from app.routers.upload_router import router as upload_router
 
@@ -25,6 +26,7 @@ app.add_middleware(
 
 Base.metadata.create_all(bind=engine)
 
+app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(tenders_router, prefix=settings.api_prefix)
 app.include_router(upload_router, prefix=settings.api_prefix)
 app.include_router(analyze_router, prefix=settings.api_prefix)

@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     ai_provider: str = Field(default="ollama")
     openai_api_key: str = Field(default="")
     ollama_base_url: str = Field(default="http://host.docker.internal:11434")
-    ollama_model: str = Field(default="qwen2.5:7b")
+    ollama_model: str = Field(default="qwen2.5:3b")
     ollama_timeout_seconds: float = Field(default=180.0)
+
+    jwt_secret_key: str = Field(default="change_me_super_secret_key")
+    jwt_algorithm: str = Field(default="HS256")
+    access_token_expire_minutes: int = Field(default=60 * 24)
 
     model_config = SettingsConfigDict(
         env_file=".env",
