@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 from typing import Any
 
 import requests
-from openai import APIConnectionError, APITimeoutError, BadRequestError, OpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import get_settings
@@ -31,14 +39,14 @@ class VendorItem(BaseModel):
 
     @field_validator("confidence", mode="before")
     @classmethod
-    def normalize_confidence(cls, value):
+    def normalize_confidence(cls, value: Any) -> Any:
         if value is None:
             return None
         try:
             numeric = float(value)
         except (TypeError, ValueError):
             return value
-        if numeric > 1 and numeric <= 100:
+        if 1 < numeric <= 100:
             return numeric / 100
         return numeric
 
@@ -56,7 +64,7 @@ class EquipmentItem(BaseModel):
 
     @field_validator("quantity", mode="before")
     @classmethod
-    def normalize_quantity(cls, value):
+    def normalize_quantity(cls, value: Any) -> Any:
         if value is None:
             return None
         if isinstance(value, bool):
@@ -77,18 +85,8 @@ class EquipmentItem(BaseModel):
 
     @field_validator("model_specified", mode="before")
     @classmethod
-    def normalize_model_specified(cls, value):
-        if value is None or isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "1", "yes", "y", "да"}:
-                return True
-            if normalized in {"false", "0", "no", "n", "нет"}:
-                return False
-        if isinstance(value, (int, float)):
-            return bool(value)
-        return value
+    def normalize_model_specified(cls, value: Any) -> Any:
+        return OpenAIAnalyzer._to_optional_bool(value)
 
 
 class IntegrationItem(BaseModel):
@@ -109,7 +107,7 @@ class TimelineInfo(BaseModel):
 
     @field_validator("implementation_days", mode="before")
     @classmethod
-    def normalize_implementation_days(cls, value):
+    def normalize_implementation_days(cls, value: Any) -> Any:
         if value is None:
             return None
         if isinstance(value, bool):
@@ -134,7 +132,7 @@ class TenderAnalysisResult(BaseModel):
     equipment: list[EquipmentItem] = Field(default_factory=list)
     total_device_count: int | None = Field(default=None, ge=0)
     vendors: list[VendorItem] = Field(default_factory=list)
-    has_or_equivalent: bool
+    has_or_equivalent: bool = False
     or_equivalent_evidence: list[str] = Field(default_factory=list)
     timelines: TimelineInfo = Field(default_factory=TimelineInfo)
     integrations: list[IntegrationItem] = Field(default_factory=list)
@@ -156,22 +154,12 @@ class TenderAnalysisResult(BaseModel):
         mode="before",
     )
     @classmethod
-    def normalize_bool_fields(cls, value):
-        if value is None or isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "1", "yes", "y", "да"}:
-                return True
-            if normalized in {"false", "0", "no", "n", "нет"}:
-                return False
-        if isinstance(value, (int, float)):
-            return bool(value)
-        return value
+    def normalize_bool_fields(cls, value: Any) -> Any:
+        return OpenAIAnalyzer._to_optional_bool(value)
 
     @field_validator("total_device_count", mode="before")
     @classmethod
-    def normalize_total_device_count(cls, value):
+    def normalize_total_device_count(cls, value: Any) -> Any:
         if value is None:
             return None
         if isinstance(value, bool):
@@ -208,11 +196,21 @@ class OpenAIAnalyzer:
         if self.provider == "openai":
             if not settings.openai_api_key:
                 raise AIAnalyzerConfigurationError("OPENAI_API_KEY is not configured")
-            self.client = OpenAI(
-                api_key=settings.openai_api_key,
-                timeout=timeout or 90.0,
-            )
-            self.model = model or "gpt-4.1"
+
+            client_kwargs: dict[str, Any] = {
+                "api_key": settings.openai_api_key,
+                "base_url": settings.openai_base_url,
+                "timeout": timeout or settings.openai_timeout_seconds,
+            }
+
+            if "openrouter.ai" in settings.openai_base_url:
+                client_kwargs["default_headers"] = {
+                    "HTTP-Referer": "http://localhost:3000",
+                    "X-OpenRouter-Title": "Tender AI",
+                }
+
+            self.client = OpenAI(**client_kwargs)
+            self.model = model or settings.openai_model
         elif self.provider == "ollama":
             self.client = None
             self.model = model or settings.ollama_model
@@ -254,33 +252,31 @@ class OpenAIAnalyzer:
                 f"Unsupported AI provider: {self.provider}"
             )
 
-        validated = self._validate_json(raw_json)
+        validated = self._validate_json(raw_json, source_payload=prepared_payload)
         return validated.model_dump()
 
     def _analyze_with_openai(self, prompt: str, schema: dict[str, Any]) -> str:
+        del schema
         try:
-            response = self.client.responses.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
-                input=prompt,
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": "tender_analysis",
-                        "schema": schema,
-                        "strict": True,
-                    }
-                },
+                response_format={"type": "json_object"},
             )
         except (APITimeoutError, APIConnectionError, RateLimitError) as exc:
-            logger.exception("OpenAI API error during tender analysis")
-            raise AIAnalyzerError(f"OpenAI API error: {exc}") from exc
+            logger.exception("OpenAI-compatible API error during tender analysis")
+            raise AIAnalyzerError(f"OpenAI-compatible API error: {exc}") from exc
         except BadRequestError as exc:
-            logger.exception("Bad request sent to OpenAI API")
-            raise AIAnalyzerError(f"OpenAI API bad request: {exc}") from exc
+            logger.exception("Bad request sent to OpenAI-compatible API")
+            raise AIAnalyzerError(
+                f"OpenAI-compatible API bad request: {exc}"
+            ) from exc
         except Exception as exc:
-            logger.exception("Unexpected OpenAI API error")
-            raise AIAnalyzerError(f"Unexpected OpenAI API error: {exc}") from exc
+            logger.exception("Unexpected OpenAI-compatible API error")
+            raise AIAnalyzerError(
+                f"Unexpected OpenAI-compatible API error: {exc}"
+            ) from exc
 
         return self._extract_openai_response_text(response)
 
@@ -291,19 +287,12 @@ class OpenAIAnalyzer:
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
             "format": schema,
-            "options": {
-                "temperature": 0,
-                "num_ctx": 4096,
-            },
+            "options": {"temperature": 0, "num_ctx": 4096},
             "keep_alive": "10m",
         }
 
         try:
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=self.timeout,
-            )
+            response = requests.post(url, json=payload, timeout=self.timeout)
             response.raise_for_status()
         except requests.Timeout as exc:
             logger.exception("Ollama request timeout")
@@ -319,17 +308,15 @@ class OpenAIAnalyzer:
             raise AIAnalyzerResponseError("Invalid Ollama response envelope") from exc
 
         content = data.get("message", {}).get("content") if isinstance(data, dict) else None
-
         if not isinstance(content, str) or not content.strip():
             raise AIAnalyzerResponseError("Empty Ollama model response")
-
         return content.strip()
 
     def _build_prompt(self, prepared_payload: dict[str, Any]) -> str:
         return f"""
-Extract data from tender documentation and return JSON only.
+Extract data from tender documentation and return ONE valid JSON object only.
 
-Fields to extract:
+Return JSON with exactly these fields:
 - project_type
 - equipment
 - total_device_count
@@ -347,12 +334,27 @@ Fields to extract:
 - has_installation_points
 - specific_model_detected
 
-Rules:
-- Use only explicit information where possible.
-- If missing, return null or empty arrays.
-- confidence must be between 0 and 1.
-- Keep output concise.
-- Return JSON only.
+Strict output rules:
+- has_or_equivalent must always be true or false, never null
+- or_equivalent_evidence must always be an array, never null
+- timelines must always be an object:
+  {{
+    "raw_text": null,
+    "implementation_days": null,
+    "delivery_deadline": null,
+    "notes": []
+  }}
+- integrations must always be an array of objects:
+  [{{"name": "string", "details": null}}]
+- certificates must always be an array of objects:
+  [{{"name": "string", "required_for": null}}]
+- extracted_languages must always be an array
+- assumptions must always be an array
+- warnings must always be an array
+- Do not wrap JSON in markdown
+- Do not add explanations before or after JSON
+- Use null only where a nullable scalar is expected
+- Return JSON only
 
 Source:
 {json.dumps(prepared_payload, ensure_ascii=False)}
@@ -370,7 +372,7 @@ Source:
         if len(trimmed_text) > self.max_input_chars:
             trimmed_text = trimmed_text[: self.max_input_chars]
 
-        compact_sections = []
+        compact_sections: list[dict[str, Any]] = []
         for section in sections[:8]:
             compact_sections.append(
                 {
@@ -380,7 +382,7 @@ Source:
                 }
             )
 
-        compact_tables = []
+        compact_tables: list[dict[str, Any]] = []
         for table in tables[:3]:
             rows = table.get("rows") or []
             compact_tables.append(
@@ -401,43 +403,535 @@ Source:
         }
 
     def _extract_openai_response_text(self, response: Any) -> str:
-        output_text = getattr(response, "output_text", None)
-        if output_text and isinstance(output_text, str):
-            return output_text.strip()
-
         try:
-            output = getattr(response, "output", []) or []
-            collected: list[str] = []
-
-            for item in output:
-                content = getattr(item, "content", []) or []
-                for part in content:
-                    part_text = getattr(part, "text", None)
-                    if isinstance(part_text, str):
-                        collected.append(part_text)
-
-            merged = "\n".join(collected).strip()
-            if merged:
-                return merged
+            choice = response.choices[0]
+            message = choice.message
+            content = getattr(message, "content", None)
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            if isinstance(content, list):
+                parts: list[str] = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                if parts:
+                    return "\n".join(parts)
         except Exception:
-            logger.exception("Failed to parse OpenAI response fallback")
+            logger.exception("Failed to parse OpenAI-compatible response")
+        raise AIAnalyzerResponseError("Empty or unreadable OpenAI-compatible response")
 
-        raise AIAnalyzerResponseError("Empty or unreadable OpenAI response")
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        optional = OpenAIAnalyzer._to_optional_bool(value)
+        return default if optional is None else optional
 
-    def _validate_json(self, raw_json: str) -> TenderAnalysisResult:
+    @staticmethod
+    def _to_optional_bool(value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "да"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "нет", ""}:
+                return False
+        return None
+
+    @staticmethod
+    def _to_string_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            result: list[str] = []
+            for item in value:
+                if item is None:
+                    continue
+                text = str(item).strip()
+                if text:
+                    result.append(text)
+            return result
+        if isinstance(value, str):
+            text = value.strip()
+            return [text] if text else []
+        return []
+
+    @staticmethod
+    def _to_timeline_dict(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return {
+                "raw_text": value.get("raw_text") or value.get("text") or value.get("raw"),
+                "implementation_days": value.get("implementation_days") or value.get("days"),
+                "delivery_deadline": value.get("delivery_deadline") or value.get("deadline"),
+                "notes": OpenAIAnalyzer._to_string_list(value.get("notes")),
+            }
+        if isinstance(value, str):
+            text = value.strip()
+            return {
+                "raw_text": text or None,
+                "implementation_days": None,
+                "delivery_deadline": None,
+                "notes": [],
+            }
+        return {
+            "raw_text": None,
+            "implementation_days": None,
+            "delivery_deadline": None,
+            "notes": [],
+        }
+
+    @staticmethod
+    def _to_integrations_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        result: list[dict[str, Any]] = []
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("title") or item.get("system")
+                if name:
+                    result.append(
+                        {
+                            "name": str(name).strip(),
+                            "details": (
+                                str(item.get("details")).strip()
+                                if item.get("details") is not None
+                                else None
+                            ),
+                        }
+                    )
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    result.append({"name": text, "details": None})
+        return result
+
+    @staticmethod
+    def _to_certificates_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        result: list[dict[str, Any]] = []
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("title")
+                if name:
+                    result.append(
+                        {
+                            "name": str(name).strip(),
+                            "required_for": (
+                                str(item.get("required_for")).strip()
+                                if item.get("required_for") is not None
+                                else None
+                            ),
+                        }
+                    )
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    result.append({"name": text, "required_for": None})
+        return result
+
+    @staticmethod
+    def _to_equipment_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        result: list[dict[str, Any]] = []
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("title") or item.get("device")
+                if not name:
+                    continue
+                result.append(
+                    {
+                        "name": str(name).strip(),
+                        "quantity": item.get("quantity"),
+                        "unit": item.get("unit"),
+                        "vendor": item.get("vendor"),
+                        "characteristics": OpenAIAnalyzer._to_string_list(
+                            item.get("characteristics")
+                        ),
+                        "model": item.get("model"),
+                        "exact_model": item.get("exact_model"),
+                        "vendor_model": item.get("vendor_model"),
+                        "model_specified": item.get("model_specified"),
+                    }
+                )
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    result.append(
+                        {
+                            "name": text,
+                            "quantity": None,
+                            "unit": None,
+                            "vendor": None,
+                            "characteristics": [],
+                            "model": None,
+                            "exact_model": None,
+                            "vendor_model": None,
+                            "model_specified": None,
+                        }
+                    )
+        return result
+
+    @staticmethod
+    def _to_vendors_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        result: list[dict[str, Any]] = []
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("vendor") or item.get("title")
+                if name:
+                    result.append(
+                        {
+                            "name": str(name).strip(),
+                            "confidence": item.get("confidence"),
+                        }
+                    )
+            elif isinstance(item, str):
+                text = item.strip()
+                if text:
+                    result.append({"name": text, "confidence": None})
+        return result
+
+    @staticmethod
+    def _normalize_result_payload(data: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(data)
+        normalized.setdefault("project_type", None)
+        normalized["equipment"] = OpenAIAnalyzer._to_equipment_list(normalized.get("equipment"))
+        normalized["total_device_count"] = normalized.get("total_device_count")
+        normalized["vendors"] = OpenAIAnalyzer._to_vendors_list(normalized.get("vendors"))
+        normalized["has_or_equivalent"] = OpenAIAnalyzer._to_bool(
+            normalized.get("has_or_equivalent"),
+            default=False,
+        )
+        normalized["or_equivalent_evidence"] = OpenAIAnalyzer._to_string_list(
+            normalized.get("or_equivalent_evidence")
+        )
+        normalized["timelines"] = OpenAIAnalyzer._to_timeline_dict(normalized.get("timelines"))
+        normalized["integrations"] = OpenAIAnalyzer._to_integrations_list(
+            normalized.get("integrations")
+        )
+        normalized["certificates"] = OpenAIAnalyzer._to_certificates_list(
+            normalized.get("certificates")
+        )
+        normalized["extracted_languages"] = OpenAIAnalyzer._to_string_list(
+            normalized.get("extracted_languages")
+        )
+        normalized["assumptions"] = OpenAIAnalyzer._to_string_list(normalized.get("assumptions"))
+        normalized["warnings"] = OpenAIAnalyzer._to_string_list(normalized.get("warnings"))
+        normalized["manufacturer_authorization_required"] = OpenAIAnalyzer._to_optional_bool(
+            normalized.get("manufacturer_authorization_required")
+        )
+        normalized["has_object_scheme"] = OpenAIAnalyzer._to_optional_bool(
+            normalized.get("has_object_scheme")
+        )
+        normalized["has_installation_points"] = OpenAIAnalyzer._to_optional_bool(
+            normalized.get("has_installation_points")
+        )
+        normalized["specific_model_detected"] = OpenAIAnalyzer._to_optional_bool(
+            normalized.get("specific_model_detected")
+        )
+        return normalized
+
+    def _validate_json(
+        self,
+        raw_json: str,
+        source_payload: dict[str, Any] | None = None,
+    ) -> TenderAnalysisResult:
+        errors: list[str] = []
+        parsed_object = self._parse_model_output(raw_json, errors)
+
+        if isinstance(parsed_object, dict):
+            normalized = self._normalize_result_payload(parsed_object)
+            try:
+                return TenderAnalysisResult.model_validate(normalized)
+            except ValidationError as exc:
+                errors.append(f"schema validation failed: {exc}")
+                logger.exception("Model JSON failed schema validation")
+
+        logger.warning(
+            "Falling back to heuristic analysis result because model output was invalid. Errors: %s",
+            errors,
+        )
+        fallback_payload = self._build_fallback_result(source_payload=source_payload, raw_output=raw_json, errors=errors)
         try:
-            data = json.loads(raw_json)
-        except json.JSONDecodeError as exc:
-            logger.exception("Model returned invalid JSON")
-            raise AIAnalyzerResponseError(f"Invalid JSON from model: {exc}") from exc
-
-        try:
-            return TenderAnalysisResult.model_validate(data)
+            return TenderAnalysisResult.model_validate(fallback_payload)
         except ValidationError as exc:
-            logger.exception("Model JSON failed schema validation")
+            logger.exception("Fallback result validation failed")
             raise AIAnalyzerResponseError(
-                f"Model JSON schema validation failed: {exc}"
+                f"Fallback result validation failed: {exc}"
             ) from exc
+
+    def _parse_model_output(self, raw_json: str, errors: list[str]) -> dict[str, Any] | None:
+        candidates = self._candidate_json_texts(raw_json)
+        seen: set[str] = set()
+        for candidate in candidates:
+            candidate = candidate.strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+
+            parsed = self._try_json_loads(candidate, errors)
+            if isinstance(parsed, dict):
+                return parsed
+
+            repaired = self._repair_json_text(candidate)
+            if repaired != candidate:
+                parsed = self._try_json_loads(repaired, errors)
+                if isinstance(parsed, dict):
+                    return parsed
+
+            parsed = self._try_literal_eval(candidate, errors)
+            if isinstance(parsed, dict):
+                return parsed
+
+            if repaired != candidate:
+                parsed = self._try_literal_eval(repaired, errors)
+                if isinstance(parsed, dict):
+                    return parsed
+
+        return None
+
+    def _candidate_json_texts(self, raw_json: str) -> list[str]:
+        normalized = self._normalize_json_text(raw_json)
+        candidates: list[str] = []
+        if normalized:
+            candidates.append(normalized)
+
+        stripped = self._strip_code_fences(normalized)
+        if stripped and stripped not in candidates:
+            candidates.append(stripped)
+
+        extracted = self._extract_first_json_object(stripped)
+        if extracted and extracted not in candidates:
+            candidates.append(extracted)
+
+        if stripped:
+            first_brace = stripped.find("{")
+            last_brace = stripped.rfind("}")
+            if 0 <= first_brace < last_brace:
+                sliced = stripped[first_brace : last_brace + 1]
+                if sliced and sliced not in candidates:
+                    candidates.append(sliced)
+
+        return candidates
+
+    @staticmethod
+    def _normalize_json_text(text: str) -> str:
+        if not isinstance(text, str):
+            return ""
+        normalized = text.replace("\ufeff", "").replace("\u200b", "").strip()
+        replacements = {
+            "“": '"',
+            "”": '"',
+            "„": '"',
+            "’": "'",
+            "‘": "'",
+            "—": "-",
+            "–": "-",
+            "\xa0": " ",
+        }
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        return normalized
+
+    @staticmethod
+    def _strip_code_fences(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
+            stripped = re.sub(r"\s*```$", "", stripped)
+        return stripped.strip()
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        start = text.find("{")
+        if start == -1:
+            return ""
+        depth = 0
+        in_string = False
+        escape = False
+        quote_char = '"'
+
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == quote_char:
+                    in_string = False
+                continue
+
+            if char in {'"', "'"}:
+                in_string = True
+                quote_char = char
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        return ""
+
+    def _repair_json_text(self, text: str) -> str:
+        repaired = text.strip()
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        repaired = re.sub(r'(?<!")([A-Za-z_][A-Za-z0-9_\-]*)\s*:', r'"\1":', repaired)
+        repaired = re.sub(r'"([^"\\]+)"\s+"([^"\\]+)"', r'"\1", "\2"', repaired)
+        repaired = re.sub(r'([}\]0-9"a-zA-Z])\s+("[A-Za-z_][^"\\]*"\s*:)', r'\1, \2', repaired)
+        repaired = re.sub(r':\s*"([^"\\]+)"\s+"([A-Za-z_][^"\\]*)"\s*:', r': "\1", "\2":', repaired)
+        repaired = re.sub(r':\s*([^,\]}\s][^,\]}]*)\s+"([A-Za-z_][^"\\]*)"\s*:', r': \1, "\2":', repaired)
+        return repaired
+
+    @staticmethod
+    def _try_json_loads(text: str, errors: list[str]) -> dict[str, Any] | None:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            errors.append(f"json.loads failed: {exc}")
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _try_literal_eval(text: str, errors: list[str]) -> dict[str, Any] | None:
+        python_like = re.sub(r"\btrue\b", "True", text, flags=re.IGNORECASE)
+        python_like = re.sub(r"\bfalse\b", "False", python_like, flags=re.IGNORECASE)
+        python_like = re.sub(r"\bnull\b", "None", python_like, flags=re.IGNORECASE)
+        try:
+            parsed = ast.literal_eval(python_like)
+        except (ValueError, SyntaxError) as exc:
+            errors.append(f"literal_eval failed: {exc}")
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _build_fallback_result(
+        self,
+        *,
+        source_payload: dict[str, Any] | None,
+        raw_output: str,
+        errors: list[str],
+    ) -> dict[str, Any]:
+        text_parts: list[str] = []
+        if source_payload:
+            document_text = source_payload.get("document_text")
+            if isinstance(document_text, str) and document_text.strip():
+                text_parts.append(document_text)
+            sections = source_payload.get("sections") or []
+            for section in sections:
+                if isinstance(section, dict):
+                    content = section.get("content")
+                    if isinstance(content, str) and content.strip():
+                        text_parts.append(content)
+        if raw_output.strip():
+            text_parts.append(raw_output[:1500])
+
+        combined_text = "\n".join(text_parts)
+        combined_lower = combined_text.lower()
+
+        languages: list[str] = []
+        if re.search(r"[а-яё]", combined_text, flags=re.IGNORECASE):
+            languages.append("ru")
+        if re.search(r"[a-z]", combined_text, flags=re.IGNORECASE):
+            languages.append("en")
+
+        implementation_days = self._extract_implementation_days(combined_text)
+        has_or_equivalent = bool(re.search(r"\bor equivalent\b|\bили эквивалент\b", combined_lower))
+        manufacturer_auth = bool(
+            re.search(
+                r"manufacturer authorization|authorization letter|авторизационн|письмо производителя",
+                combined_lower,
+            )
+        )
+        has_object_scheme = bool(
+            re.search(r"scheme|diagram|layout|схем[аы]|план объект", combined_lower)
+        )
+        has_installation_points = bool(
+            re.search(r"installation point|mounting point|точк[аи] установки|места установки", combined_lower)
+        )
+        specific_model_detected = bool(
+            re.search(r"\b[A-Z]{2,}[\-_/]?[A-Z0-9]{2,}\b", combined_text)
+        )
+
+        warnings = [
+            "Model output was invalid. Returned heuristic fallback result to keep the pipeline running."
+        ]
+        warnings.extend(errors[:5])
+
+        return {
+            "project_type": None,
+            "equipment": [],
+            "total_device_count": None,
+            "vendors": [],
+            "has_or_equivalent": has_or_equivalent,
+            "or_equivalent_evidence": self._collect_or_equivalent_evidence(combined_text),
+            "timelines": {
+                "raw_text": self._extract_timeline_text(combined_text),
+                "implementation_days": implementation_days,
+                "delivery_deadline": None,
+                "notes": [],
+            },
+            "integrations": [],
+            "certificates": [],
+            "extracted_languages": languages,
+            "assumptions": [
+                "Fallback result generated because the model response could not be parsed safely."
+            ],
+            "warnings": warnings,
+            "manufacturer_authorization_required": manufacturer_auth,
+            "has_object_scheme": has_object_scheme,
+            "has_installation_points": has_installation_points,
+            "specific_model_detected": specific_model_detected,
+        }
+
+    @staticmethod
+    def _extract_implementation_days(text: str) -> int | None:
+        patterns = [
+            r"within\s+(\d{1,4})\s+calendar\s+days",
+            r"within\s+(\d{1,4})\s+days",
+            r"implementation\s*[:\-]?\s*(\d{1,4})\s+days",
+            r"срок\s*[:\-]?\s*(\d{1,4})\s+дн",
+            r"в\s*течение\s*(\d{1,4})\s+дн",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _extract_timeline_text(text: str) -> str | None:
+        for line in text.splitlines():
+            cleaned = line.strip()
+            if cleaned and re.search(r"deadline|срок|calendar days|дней|дн", cleaned, flags=re.IGNORECASE):
+                return cleaned[:500]
+        return None
+
+    @staticmethod
+    def _collect_or_equivalent_evidence(text: str) -> list[str]:
+        evidence: list[str] = []
+        for line in text.splitlines():
+            cleaned = line.strip()
+            if cleaned and re.search(r"\bor equivalent\b|\bили эквивалент\b", cleaned, flags=re.IGNORECASE):
+                evidence.append(cleaned[:300])
+                if len(evidence) >= 3:
+                    break
+        return evidence
 
     @staticmethod
     def _json_schema() -> dict[str, Any]:
@@ -486,23 +980,38 @@ Source:
                         "additionalProperties": False,
                         "properties": {
                             "name": {"type": "string"},
-                            "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+                            "confidence": {
+                                "type": ["number", "null"],
+                                "minimum": 0,
+                                "maximum": 1,
+                            },
                         },
                         "required": ["name", "confidence"],
                     },
                 },
                 "has_or_equivalent": {"type": "boolean"},
-                "or_equivalent_evidence": {"type": "array", "items": {"type": "string"}},
+                "or_equivalent_evidence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
                 "timelines": {
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
                         "raw_text": {"type": ["string", "null"]},
-                        "implementation_days": {"type": ["integer", "null"], "minimum": 0},
+                        "implementation_days": {
+                            "type": ["integer", "null"],
+                            "minimum": 0,
+                        },
                         "delivery_deadline": {"type": ["string", "null"]},
                         "notes": {"type": "array", "items": {"type": "string"}},
                     },
-                    "required": ["raw_text", "implementation_days", "delivery_deadline", "notes"],
+                    "required": [
+                        "raw_text",
+                        "implementation_days",
+                        "delivery_deadline",
+                        "notes",
+                    ],
                 },
                 "integrations": {
                     "type": "array",
@@ -528,10 +1037,21 @@ Source:
                         "required": ["name", "required_for"],
                     },
                 },
-                "extracted_languages": {"type": "array", "items": {"type": "string"}},
-                "assumptions": {"type": "array", "items": {"type": "string"}},
-                "warnings": {"type": "array", "items": {"type": "string"}},
-                "manufacturer_authorization_required": {"type": ["boolean", "null"]},
+                "extracted_languages": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "assumptions": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "warnings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "manufacturer_authorization_required": {
+                    "type": ["boolean", "null"]
+                },
                 "has_object_scheme": {"type": ["boolean", "null"]},
                 "has_installation_points": {"type": ["boolean", "null"]},
                 "specific_model_detected": {"type": ["boolean", "null"]},

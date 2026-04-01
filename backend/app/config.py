@@ -20,8 +20,13 @@ class Settings(BaseSettings):
     redis_host: str = Field(default="redis")
     redis_port: int = Field(default=6379)
 
-    ai_provider: str = Field(default="ollama")
+    ai_provider: str = Field(default="openai")
+
     openai_api_key: str = Field(default="")
+    openai_base_url: str = Field(default="https://openrouter.ai/api/v1")
+    openai_model: str = Field(default="openai/gpt-4o")
+    openai_timeout_seconds: float = Field(default=120.0)
+
     ollama_base_url: str = Field(default="http://host.docker.internal:11434")
     ollama_model: str = Field(default="qwen2.5:3b")
     ollama_timeout_seconds: float = Field(default=180.0)
