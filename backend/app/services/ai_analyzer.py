@@ -3,7 +3,10 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import os
 import re
+import time
+import unicodedata
 from typing import Any
 
 import requests
@@ -211,11 +214,17 @@ class OpenAIAnalyzer:
 
             self.client = OpenAI(**client_kwargs)
             self.model = model or settings.openai_model
+            self.fallback_models = self._load_fallback_models(self.model)
+            self.request_retries = 2
+            self.retry_backoff_seconds = 1.5
         elif self.provider == "ollama":
             self.client = None
             self.model = model or settings.ollama_model
             self.timeout = timeout or settings.ollama_timeout_seconds
             self.base_url = settings.ollama_base_url.rstrip("/")
+            self.fallback_models = []
+            self.request_retries = 1
+            self.retry_backoff_seconds = 1.0
         else:
             raise AIAnalyzerConfigurationError(
                 f"Unsupported AI_PROVIDER: {settings.ai_provider}"
@@ -243,42 +252,100 @@ class OpenAIAnalyzer:
         prompt = self._build_prompt(prepared_payload)
         schema = self._json_schema()
 
-        if self.provider == "openai":
-            raw_json = self._analyze_with_openai(prompt, schema)
-        elif self.provider == "ollama":
-            raw_json = self._analyze_with_ollama(prompt, schema)
-        else:
-            raise AIAnalyzerConfigurationError(
-                f"Unsupported AI provider: {self.provider}"
-            )
+        try:
+            if self.provider == "openai":
+                raw_json = self._analyze_with_openai(prompt, schema)
+            elif self.provider == "ollama":
+                raw_json = self._analyze_with_ollama(prompt, schema)
+            else:
+                raise AIAnalyzerConfigurationError(
+                    f"Unsupported AI provider: {self.provider}"
+                )
 
-        validated = self._validate_json(raw_json, source_payload=prepared_payload)
-        return validated.model_dump()
+            validated = self._validate_json(raw_json, source_payload=prepared_payload)
+            return validated.model_dump()
+        except AIAnalyzerConfigurationError:
+            raise
+        except AIAnalyzerError as exc:
+            logger.exception("AI analysis failed, returning fallback result")
+            fallback_payload = self._build_fallback_result(
+                source_payload=prepared_payload,
+                raw_output="",
+                errors=[self._format_exception(exc)],
+            )
+            return TenderAnalysisResult.model_validate(fallback_payload).model_dump()
+        except Exception as exc:
+            logger.exception("Unexpected analyzer failure, returning fallback result")
+            fallback_payload = self._build_fallback_result(
+                source_payload=prepared_payload,
+                raw_output="",
+                errors=[self._format_exception(exc)],
+            )
+            return TenderAnalysisResult.model_validate(fallback_payload).model_dump()
+
 
     def _analyze_with_openai(self, prompt: str, schema: dict[str, Any]) -> str:
         del schema
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
-        except (APITimeoutError, APIConnectionError, RateLimitError) as exc:
-            logger.exception("OpenAI-compatible API error during tender analysis")
-            raise AIAnalyzerError(f"OpenAI-compatible API error: {exc}") from exc
-        except BadRequestError as exc:
-            logger.exception("Bad request sent to OpenAI-compatible API")
-            raise AIAnalyzerError(
-                f"OpenAI-compatible API bad request: {exc}"
-            ) from exc
-        except Exception as exc:
-            logger.exception("Unexpected OpenAI-compatible API error")
-            raise AIAnalyzerError(
-                f"Unexpected OpenAI-compatible API error: {exc}"
-            ) from exc
 
-        return self._extract_openai_response_text(response)
+        errors: list[str] = []
+        for candidate_model in self._iter_candidate_models():
+            for attempt in range(1, self.request_retries + 1):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=candidate_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0,
+                        response_format={"type": "json_object"},
+                    )
+                    return self._extract_openai_response_text(response)
+                except (RateLimitError, APITimeoutError, APIConnectionError, BadRequestError) as exc:
+                    if self._is_rate_limit_error(exc):
+                        message = (
+                            f"{candidate_model} rate-limited on attempt {attempt}: "
+                            f"{self._format_exception(exc)}"
+                        )
+                    else:
+                        message = (
+                            f"{candidate_model} request failed on attempt {attempt}: "
+                            f"{self._format_exception(exc)}"
+                        )
+                    logger.warning(message)
+                    errors.append(message)
+                    if attempt < self.request_retries:
+                        time.sleep(self.retry_backoff_seconds * attempt)
+                        continue
+                    break
+                except Exception as exc:
+                    if self._is_rate_limit_error(exc):
+                        message = (
+                            f"{candidate_model} rate-limited on attempt {attempt}: "
+                            f"{self._format_exception(exc)}"
+                        )
+                        logger.warning(message)
+                        errors.append(message)
+                        if attempt < self.request_retries:
+                            time.sleep(self.retry_backoff_seconds * attempt)
+                            continue
+                        break
+
+                    logger.exception(
+                        "OpenAI SDK parsing/request failed for model %s, trying HTTP fallback",
+                        candidate_model,
+                    )
+                    try:
+                        return self._analyze_with_openai_http_fallback(
+                            prompt,
+                            model_name=candidate_model,
+                            original_error=exc,
+                        )
+                    except AIAnalyzerError as fallback_exc:
+                        errors.append(self._format_exception(fallback_exc))
+                        break
+
+        raise AIAnalyzerError(
+            "OpenAI-compatible API error: all model attempts failed. " + " | ".join(errors[:8])
+        )
+
 
     def _analyze_with_ollama(self, prompt: str, schema: dict[str, Any]) -> str:
         url = f"{self.base_url}/api/chat"
@@ -311,6 +378,129 @@ class OpenAIAnalyzer:
         if not isinstance(content, str) or not content.strip():
             raise AIAnalyzerResponseError("Empty Ollama model response")
         return content.strip()
+
+    def _analyze_with_openai_http_fallback(
+        self,
+        prompt: str,
+        model_name: str,
+        original_error: Exception,
+    ) -> str:
+        base_url = (self.settings.openai_base_url or "").rstrip("/")
+        if not base_url:
+            raise AIAnalyzerError(f"Unexpected OpenAI-compatible API error: {original_error}") from original_error
+
+        url = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter.ai" in base_url:
+            headers["HTTP-Referer"] = "http://localhost:3000"
+            headers["X-OpenRouter-Title"] = "Tender AI"
+
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+
+        last_error: Exception | None = None
+        for use_response_format in (True, False):
+            request_payload = dict(payload)
+            if not use_response_format:
+                request_payload.pop("response_format", None)
+            try:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=request_payload,
+                    timeout=self.settings.openai_timeout_seconds,
+                )
+
+                if response.status_code == 429:
+                    raw_body = response.text[:500]
+                    raise AIAnalyzerError(
+                        f"Rate limit from provider for model {model_name}: {raw_body}"
+                    )
+
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+                raise AIAnalyzerResponseError("Empty HTTP fallback model response")
+            except AIAnalyzerError as exc:
+                last_error = exc
+                logger.warning(
+                    "HTTP fallback request rate-limited/failed for model %s (response_format=%s): %s",
+                    model_name,
+                    use_response_format,
+                    exc,
+                )
+            except Exception as exc:
+                last_error = exc
+                logger.exception(
+                    "HTTP fallback request to OpenAI-compatible API failed for model %s (response_format=%s)",
+                    model_name,
+                    use_response_format,
+                )
+
+        raise AIAnalyzerError(
+            f"Unexpected OpenAI-compatible API error for model {model_name}: {original_error}. HTTP fallback failed: {last_error}"
+        ) from original_error
+
+    def _load_fallback_models(self, primary_model: str) -> list[str]:
+        raw = os.getenv("OPENAI_FALLBACK_MODELS", "")
+        models: list[str] = []
+        for item in raw.split(","):
+            name = item.strip()
+            if name and name != primary_model and name not in models:
+                models.append(name)
+        return models
+
+    def _iter_candidate_models(self) -> list[str]:
+        result = [self.model]
+        for name in self.fallback_models:
+            if name not in result:
+                result.append(name)
+        return result
+
+    @staticmethod
+    def _format_exception(exc: Exception) -> str:
+        try:
+            message = str(exc).strip()
+        except Exception:
+            message = exc.__class__.__name__
+        return message or exc.__class__.__name__
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        if isinstance(exc, RateLimitError):
+            return True
+
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return True
+
+        response = getattr(exc, "response", None)
+        if response is not None:
+            response_status = getattr(response, "status_code", None)
+            if response_status == 429:
+                return True
+
+        message = OpenAIAnalyzer._format_exception(exc).lower()
+        rate_limit_markers = (
+            "error code: 429",
+            "code: 429",
+            "status code 429",
+            "rate-limit",
+            "rate limit",
+            "rate limited",
+            "temporarily rate-limited",
+            "too many requests",
+        )
+        return any(marker in message for marker in rate_limit_markers)
 
     def _build_prompt(self, prepared_payload: dict[str, Any]) -> str:
         return f"""
@@ -357,8 +547,53 @@ Strict output rules:
 - Return JSON only
 
 Source:
-{json.dumps(prepared_payload, ensure_ascii=False)}
+{json.dumps(prepared_payload, ensure_ascii=False, allow_nan=False)}
         """.strip()
+
+    @staticmethod
+    def _sanitize_text(value: Any, *, max_len: int | None = None) -> str:
+        if value is None:
+            text = ""
+        elif isinstance(value, str):
+            text = value
+        else:
+            text = str(value)
+
+        text = unicodedata.normalize("NFKC", text)
+        text = text.replace("\x00", " ").replace("\ufeff", "").replace("\u200b", "")
+        text = "".join(
+            ch if (ch in "\n\r\t" or unicodedata.category(ch)[0] != "C") else " "
+            for ch in text
+        )
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+        if max_len is not None and len(text) > max_len:
+            text = text[:max_len]
+        return text
+
+    @classmethod
+    def _sanitize_json_compatible(cls, value: Any, *, max_string_len: int = 500) -> Any:
+        if value is None or isinstance(value, (bool, int)):
+            return value
+        if isinstance(value, float):
+            if value != value:
+                return None
+            if value == float("inf") or value == float("-inf"):
+                return None
+            return value
+        if isinstance(value, str):
+            return cls._sanitize_text(value, max_len=max_string_len)
+        if isinstance(value, list):
+            return [cls._sanitize_json_compatible(item, max_string_len=max_string_len) for item in value[:50]]
+        if isinstance(value, tuple):
+            return [cls._sanitize_json_compatible(item, max_string_len=max_string_len) for item in value[:50]]
+        if isinstance(value, dict):
+            cleaned: dict[str, Any] = {}
+            for key, item in list(value.items())[:50]:
+                cleaned[str(key)] = cls._sanitize_json_compatible(item, max_string_len=max_string_len)
+            return cleaned
+        return cls._sanitize_text(value, max_len=max_string_len)
 
     def _build_input_payload(
         self,
@@ -368,17 +603,15 @@ Source:
         tables: list[dict[str, Any]],
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
-        trimmed_text = (document_text or "").strip()
-        if len(trimmed_text) > self.max_input_chars:
-            trimmed_text = trimmed_text[: self.max_input_chars]
+        trimmed_text = self._sanitize_text(document_text, max_len=self.max_input_chars)
 
         compact_sections: list[dict[str, Any]] = []
         for section in sections[:8]:
             compact_sections.append(
                 {
                     "index": section.get("index"),
-                    "title": section.get("title"),
-                    "content": (section.get("content") or "")[:700],
+                    "title": self._sanitize_text(section.get("title"), max_len=120) or None,
+                    "content": self._sanitize_text(section.get("content"), max_len=700),
                 }
             )
 
@@ -388,19 +621,20 @@ Source:
             compact_tables.append(
                 {
                     "index": table.get("index"),
-                    "title": table.get("title"),
+                    "title": self._sanitize_text(table.get("title"), max_len=120) or None,
                     "page": table.get("page"),
-                    "sheet": table.get("sheet"),
-                    "rows": rows[:8],
+                    "sheet": self._sanitize_text(table.get("sheet"), max_len=120) or None,
+                    "rows": self._sanitize_json_compatible(rows[:8], max_string_len=250),
                 }
             )
 
         return {
-            "metadata": metadata,
+            "metadata": self._sanitize_json_compatible(metadata, max_string_len=250),
             "document_text": trimmed_text[:3000],
             "sections": compact_sections,
             "tables": compact_tables,
         }
+
 
     def _extract_openai_response_text(self, response: Any) -> str:
         try:
@@ -730,7 +964,7 @@ Source:
     def _normalize_json_text(text: str) -> str:
         if not isinstance(text, str):
             return ""
-        normalized = text.replace("\ufeff", "").replace("\u200b", "").strip()
+        normalized = OpenAIAnalyzer._sanitize_text(text)
         replacements = {
             "“": '"',
             "”": '"',
@@ -744,6 +978,7 @@ Source:
         for old, new in replacements.items():
             normalized = normalized.replace(old, new)
         return normalized
+
 
     @staticmethod
     def _strip_code_fences(text: str) -> str:
