@@ -202,11 +202,13 @@ def _make_reason(rule: RiskRule, triggered: bool, details: str | None = None) ->
 
 
 def _build_decision(score: int) -> str:
-    if score >= 80:
+    if score > 120:
+        return "do_not_participate"
+    if score > 70:
         return "risky"
-    if score >= 40:
-        return "medium"
-    return "low"
+    if score > 30:
+        return "go_with_conditions"
+    return "go"
 
 
 def calculate_risk_score(analysis_data: dict[str, Any] | None) -> dict[str, Any]:
@@ -216,6 +218,67 @@ def calculate_risk_score(analysis_data: dict[str, Any] | None) -> dict[str, Any]
     if not isinstance(analysis_data, dict):
         raise ValueError("analysis_data must be a dictionary")
 
+    # New mode: scoring_inputs already prepared
+    if "specific_model_equipment" in analysis_data or "no_or_equivalent" in analysis_data:
+        scoring_inputs = analysis_data
+        score = 0
+        reasons: list[dict[str, Any]] = []
+
+        mapping = {
+            "specific_model_equipment": ("specific_model_equipment", "Указаны конкретные модели оборудования"),
+            "no_or_equivalent": ("no_or_equivalent", 'Отсутствует формулировка "или эквивалент"'),
+            "manufacturer_authorization_required": ("manufacturer_authorization_required", "Требуется авторизация производителя"),
+            "partner_status_required": ("partner_status_required", "Требуется партнерский статус"),
+            "unique_characteristics_detected": ("specific_model_equipment", "Выявлены уникальные технические характеристики"),
+            "implementation_lt_30_days": ("implementation_lt_30_days", "Срок реализации менее 30 дней"),
+            "timeline_not_matching_scope": ("implementation_lt_30_days", "Сроки не соответствуют объему работ"),
+            "delivery_gt_project_timeline": ("implementation_lt_30_days", "Срок поставки превышает срок проекта"),
+            "no_architecture_or_scheme": ("no_object_scheme", "Отсутствует схема или архитектура решения"),
+            "no_object_plan": ("no_object_scheme", "Отсутствует план объекта"),
+            "no_installation_points": ("no_installation_points", "Отсутствуют точки установки"),
+            "no_cable_routes": ("no_installation_points", "Отсутствуют кабельные трассы"),
+            "unique_experience_required": ("manufacturer_authorization_required", "Требуется уникальный опыт"),
+            "specific_project_experience_required": ("manufacturer_authorization_required", "Требуется опыт конкретного проекта"),
+            "specific_vendor_experience_required": ("manufacturer_authorization_required", "Требуется опыт с конкретным вендором"),
+            "external_system_integrations": ("implementation_lt_30_days", "Есть сложные внешние интеграции"),
+            "nonstandard_architecture": ("implementation_lt_30_days", "Требуется нестандартная архитектура"),
+            "site_survey_required": ("no_object_scheme", "Необходимо обследование объекта"),
+        }
+
+        for key, enabled in scoring_inputs.items():
+            if enabled is not True:
+                continue
+
+            mapped = mapping.get(key)
+            if not mapped:
+                continue
+
+            base_rule_code, details = mapped
+            rule = RISK_RULES.get(base_rule_code)
+            if rule is None:
+                continue
+
+            score += rule.points
+            reasons.append(
+                _make_reason(
+                    rule,
+                    True,
+                    details,
+                )
+            )
+
+        score = min(score, MAX_RISK_SCORE)
+        decision = _build_decision(score)
+
+        return {
+            "score": score,
+            "max_score": MAX_RISK_SCORE,
+            "decision": decision,
+            "reasons": reasons,
+            "triggered_rules": [reason["code"] for reason in reasons],
+        }
+
+    # Legacy mode: old aggregated flat analysis_data
     score = 0
     reasons: list[dict[str, Any]] = []
 

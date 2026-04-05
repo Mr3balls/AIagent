@@ -36,11 +36,32 @@ def _unique_preserve_order(items: list[str]) -> list[str]:
     return result
 
 
+def _status_label(value: Any) -> str:
+    if value == "yes":
+        return "Да"
+    if value == "no":
+        return "Нет"
+    if value == "unknown":
+        return "Не определено"
+    if isinstance(value, bool):
+        return "Да" if value else "Нет"
+    return "Не определено"
+
+
 def _extract_general_info(
     tender_data: dict[str, Any],
     analysis_data: dict[str, Any],
 ) -> dict[str, Any]:
     timelines = _safe_dict(analysis_data.get("timelines"))
+    timeline_assessment = _safe_dict(analysis_data.get("timeline_assessment"))
+
+    implementation_days = timeline_assessment.get("implementation_days")
+    if implementation_days is None:
+        implementation_days = timelines.get("implementation_days")
+
+    delivery_deadline = _safe_str(timeline_assessment.get("delivery_deadline"))
+    if not delivery_deadline:
+        delivery_deadline = _safe_str(timelines.get("delivery_deadline"))
 
     return {
         "tender_id": tender_data.get("id"),
@@ -49,8 +70,8 @@ def _extract_general_info(
         "description": _safe_str(tender_data.get("description")),
         "status": _safe_str(tender_data.get("status")),
         "project_type": _safe_str(analysis_data.get("project_type")),
-        "delivery_deadline": _safe_str(timelines.get("delivery_deadline")),
-        "implementation_days": timelines.get("implementation_days"),
+        "delivery_deadline": delivery_deadline,
+        "implementation_days": implementation_days,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -80,6 +101,10 @@ def _generate_summary(
     total_device_count = analysis_data.get("total_device_count")
     vendors = _safe_list(analysis_data.get("vendors"))
     timelines = _safe_dict(analysis_data.get("timelines"))
+    timeline_assessment = _safe_dict(analysis_data.get("timeline_assessment"))
+    tailoring = _safe_dict(analysis_data.get("tailoring_analysis"))
+    completeness = _safe_dict(analysis_data.get("documentation_completeness"))
+    decision_block = _safe_dict(analysis_data.get("decision"))
 
     summary_parts = [
         f"{title}.",
@@ -92,16 +117,30 @@ def _generate_summary(
         summary_parts.append(f"Суммарное количество устройств: {total_device_count}.")
     if vendors:
         summary_parts.append(f"Упоминаемые вендоры: {', '.join(_extract_vendor_names(vendors))}.")
-    if timelines.get("implementation_days") is not None:
-        summary_parts.append(
-            f"Срок реализации: {timelines.get('implementation_days')} дней."
-        )
+
+    implementation_days = timeline_assessment.get("implementation_days")
+    if implementation_days is None:
+        implementation_days = timelines.get("implementation_days")
+    if implementation_days is not None:
+        summary_parts.append(f"Срок реализации: {implementation_days} дней.")
 
     has_or_equivalent = analysis_data.get("has_or_equivalent")
     if has_or_equivalent is True:
         summary_parts.append('Формулировка "или эквивалент" обнаружена.')
     elif has_or_equivalent is False:
         summary_parts.append('Формулировка "или эквивалент" не обнаружена.')
+
+    tailoring_signs = _safe_list(tailoring.get("tailoring_signs"))
+    if tailoring_signs:
+        summary_parts.append("Обнаружены признаки заточки: " + "; ".join(map(str, tailoring_signs[:3])) + ".")
+
+    missing_information = _safe_list(completeness.get("missing_information"))
+    if missing_information:
+        summary_parts.append("Недостающие исходные данные: " + ", ".join(map(str, missing_information[:4])) + ".")
+
+    recommendation = _safe_str(decision_block.get("recommendation"))
+    if recommendation:
+        summary_parts.append(f"Предварительная рекомендация: {recommendation}.")
 
     return " ".join(summary_parts)
 
@@ -124,28 +163,41 @@ def _build_key_requirements(analysis_data: dict[str, Any]) -> list[dict[str, Any
         if not isinstance(item, dict):
             continue
 
+        characteristics = _safe_list(item.get("characteristics"))
+        if not characteristics:
+            characteristics = _safe_list(item.get("specs"))
+
         requirement = {
             "category": "equipment",
             "title": _safe_str(item.get("name")) or "Оборудование",
             "quantity": item.get("quantity"),
             "unit": _safe_str(item.get("unit")),
             "vendor": _safe_str(item.get("vendor")),
-            "characteristics": _safe_list(item.get("characteristics")),
+            "characteristics": characteristics,
             "model": _safe_str(item.get("model")),
         }
         requirements.append(requirement)
 
     integrations = _safe_list(analysis_data.get("integrations"))
-    for item in integrations:
-        if not isinstance(item, dict):
-            continue
-        requirements.append(
-            {
-                "category": "integration",
-                "title": _safe_str(item.get("name")) or "Интеграция",
-                "details": _safe_str(item.get("details")),
-            }
-        )
+    if integrations and isinstance(integrations[0], dict) and "name" in integrations[0]:
+        for item in integrations:
+            if not isinstance(item, dict):
+                continue
+            requirements.append(
+                {
+                    "category": "integration",
+                    "title": _safe_str(item.get("name")) or "Интеграция",
+                    "details": _safe_str(item.get("details")),
+                }
+            )
+    else:
+        integration_block = _safe_dict(analysis_data.get("integrations"))
+        for name in _safe_list(integration_block.get("government_systems")):
+            requirements.append({"category": "integration", "title": str(name), "details": "Государственная система"})
+        for name in _safe_list(integration_block.get("existing_infrastructure_integrations")):
+            requirements.append({"category": "integration", "title": str(name), "details": "Существующая инфраструктура"})
+        for name in _safe_list(integration_block.get("specialized_platform_integrations")):
+            requirements.append({"category": "integration", "title": str(name), "details": "Специализированная платформа"})
 
     certificates = _safe_list(analysis_data.get("certificates"))
     for item in certificates:
@@ -160,14 +212,15 @@ def _build_key_requirements(analysis_data: dict[str, Any]) -> list[dict[str, Any
         )
 
     timelines = _safe_dict(analysis_data.get("timelines"))
-    if timelines:
+    timeline_assessment = _safe_dict(analysis_data.get("timeline_assessment"))
+    if timelines or timeline_assessment:
         requirements.append(
             {
                 "category": "timeline",
                 "title": "Сроки реализации",
                 "value": {
                     "raw_text": _safe_str(timelines.get("raw_text")),
-                    "implementation_days": timelines.get("implementation_days"),
+                    "implementation_days": timeline_assessment.get("implementation_days", timelines.get("implementation_days")),
                     "delivery_deadline": _safe_str(timelines.get("delivery_deadline")),
                     "notes": _safe_list(timelines.get("notes")),
                 },
@@ -181,52 +234,122 @@ def _evaluate_document_completeness(
     analysis_data: dict[str, Any],
     tender_data: dict[str, Any],
 ) -> dict[str, Any]:
-    documents = _safe_list(tender_data.get("documents"))
+    completeness_block = _safe_dict(analysis_data.get("documentation_completeness"))
 
+    if completeness_block:
+        checks = [
+            {
+                "code": "enough_data_for_estimation",
+                "label": "Достаточно данных для расчета",
+                "present": completeness_block.get("enough_data_for_estimation") == "yes",
+                "status": _status_label(completeness_block.get("enough_data_for_estimation")),
+            },
+            {
+                "code": "has_architecture_scheme",
+                "label": "Есть схема или архитектура решения",
+                "present": completeness_block.get("has_architecture_scheme") == "yes",
+                "status": _status_label(completeness_block.get("has_architecture_scheme")),
+            },
+            {
+                "code": "has_object_plan",
+                "label": "Есть план объекта",
+                "present": completeness_block.get("has_object_plan") == "yes",
+                "status": _status_label(completeness_block.get("has_object_plan")),
+            },
+            {
+                "code": "has_installation_points",
+                "label": "Есть точки установки",
+                "present": completeness_block.get("has_installation_points") == "yes",
+                "status": _status_label(completeness_block.get("has_installation_points")),
+            },
+            {
+                "code": "has_cable_routes",
+                "label": "Есть кабельные трассы",
+                "present": completeness_block.get("has_cable_routes") == "yes",
+                "status": _status_label(completeness_block.get("has_cable_routes")),
+            },
+            {
+                "code": "has_power_supply_info",
+                "label": "Есть данные по электропитанию",
+                "present": completeness_block.get("has_power_supply_info") == "yes",
+                "status": _status_label(completeness_block.get("has_power_supply_info")),
+            },
+            {
+                "code": "has_existing_infrastructure_info",
+                "label": "Есть данные по существующей инфраструктуре",
+                "present": completeness_block.get("has_existing_infrastructure_info") == "yes",
+                "status": _status_label(completeness_block.get("has_existing_infrastructure_info")),
+            },
+        ]
+
+        present_count = sum(1 for item in checks if item["present"])
+        total_count = len(checks)
+        completeness_percent = round((present_count / total_count) * 100, 2) if total_count else 0.0
+
+        missing_items = _safe_list(completeness_block.get("missing_information"))
+        if not missing_items:
+            missing_items = [item["label"] for item in checks if not item["present"]]
+
+        return {
+            "score_percent": completeness_percent,
+            "present_checks": present_count,
+            "total_checks": total_count,
+            "checks": checks,
+            "missing_items": missing_items,
+            "comment": _safe_str(completeness_block.get("completeness_comment")),
+        }
+
+    documents = _safe_list(tender_data.get("documents"))
     checks = [
         {
             "code": "has_description",
             "label": "Есть описание тендера",
             "present": bool(_safe_str(tender_data.get("description"))),
+            "status": None,
         },
         {
             "code": "has_documents",
             "label": "Загружены документы",
             "present": len(documents) > 0,
+            "status": None,
         },
         {
             "code": "has_equipment",
             "label": "Выявлены позиции оборудования",
             "present": len(_safe_list(analysis_data.get("equipment"))) > 0,
+            "status": None,
         },
         {
             "code": "has_timeline",
             "label": "Выявлены сроки реализации",
             "present": _safe_dict(analysis_data.get("timelines")).get("implementation_days") is not None
             or bool(_safe_str(_safe_dict(analysis_data.get("timelines")).get("delivery_deadline"))),
+            "status": None,
         },
         {
             "code": "has_integrations_or_certificates",
             "label": "Есть данные по интеграциям или сертификатам",
             "present": len(_safe_list(analysis_data.get("integrations"))) > 0
             or len(_safe_list(analysis_data.get("certificates"))) > 0,
+            "status": None,
         },
         {
             "code": "has_object_scheme_info",
             "label": "Есть схема объекта",
             "present": bool(analysis_data.get("has_object_scheme")) if analysis_data.get("has_object_scheme") is not None else False,
+            "status": None,
         },
         {
             "code": "has_installation_points_info",
             "label": "Есть точки установки",
             "present": bool(analysis_data.get("has_installation_points")) if analysis_data.get("has_installation_points") is not None else False,
+            "status": None,
         },
     ]
 
     present_count = sum(1 for item in checks if item["present"])
     total_count = len(checks)
     completeness_percent = round((present_count / total_count) * 100, 2) if total_count else 0.0
-
     missing_items = [item["label"] for item in checks if not item["present"]]
 
     return {
@@ -235,6 +358,7 @@ def _evaluate_document_completeness(
         "total_checks": total_count,
         "checks": checks,
         "missing_items": missing_items,
+        "comment": None,
     }
 
 
@@ -242,7 +366,54 @@ def _build_tailoring_signs(
     analysis_data: dict[str, Any],
     risk_data: dict[str, Any],
 ) -> dict[str, Any]:
+    tailoring = _safe_dict(analysis_data.get("tailoring_analysis"))
     signs: list[dict[str, Any]] = []
+
+    if tailoring:
+        for item in _safe_list(tailoring.get("tailoring_signs")):
+            title = _safe_str(item)
+            if not title:
+                continue
+            signs.append(
+                {
+                    "code": title.lower().replace(" ", "_"),
+                    "title": title,
+                    "risk_level": _safe_str(tailoring.get("tailoring_probability")) or "medium",
+                }
+            )
+
+        for model in _safe_list(tailoring.get("specific_models_detected")):
+            text = _safe_str(model)
+            if text and not any(sign["title"] == text for sign in signs):
+                signs.append(
+                    {
+                        "code": "specific_model_equipment",
+                        "title": f"Указана модель: {text}",
+                        "risk_level": "high",
+                    }
+                )
+
+        for reason in _safe_list(risk_data.get("reasons")):
+            if not isinstance(reason, dict):
+                continue
+            code = _safe_str(reason.get("code"))
+            description = _safe_str(reason.get("description"))
+            if code and not any(sign["code"] == code for sign in signs):
+                signs.append(
+                    {
+                        "code": code,
+                        "title": description or code,
+                        "risk_level": "medium",
+                    }
+                )
+
+        return {
+            "detected": len(signs) > 0,
+            "items": signs,
+            "evidence": _safe_list(analysis_data.get("or_equivalent_evidence")),
+            "comment": _safe_str(tailoring.get("tailoring_comment")),
+            "probability": _safe_str(tailoring.get("tailoring_probability")),
+        }
 
     equipment = _safe_list(analysis_data.get("equipment"))
     specific_model_detected = False
@@ -301,10 +472,26 @@ def _build_tailoring_signs(
         "detected": len(signs) > 0,
         "items": signs,
         "evidence": _safe_list(analysis_data.get("or_equivalent_evidence")),
+        "comment": None,
+        "probability": None,
     }
 
 
 def _build_timeline_analysis(analysis_data: dict[str, Any]) -> dict[str, Any]:
+    timeline_assessment = _safe_dict(analysis_data.get("timeline_assessment"))
+    if timeline_assessment:
+        return {
+            "raw_text": _safe_str(_safe_dict(analysis_data.get("timelines")).get("raw_text")),
+            "implementation_days": timeline_assessment.get("implementation_days"),
+            "delivery_deadline": _safe_str(_safe_dict(analysis_data.get("timelines")).get("delivery_deadline")),
+            "notes": _safe_list(_safe_dict(analysis_data.get("timelines")).get("notes")),
+            "status": _safe_str(timeline_assessment.get("timeline_risk_level")) or "unknown",
+            "assessment": _safe_str(timeline_assessment.get("timeline_comment")) or "Оценка сроков не сформирована.",
+            "timeline_matches_scope": _status_label(timeline_assessment.get("timeline_matches_scope")),
+            "delivery_exceeds_project_timeline": _status_label(timeline_assessment.get("delivery_exceeds_project_timeline")),
+            "requires_site_survey": _status_label(timeline_assessment.get("requires_site_survey")),
+        }
+
     timelines = _safe_dict(analysis_data.get("timelines"))
     implementation_days = timelines.get("implementation_days")
 
@@ -364,13 +551,35 @@ def _build_questions_to_customer(
     completeness: dict[str, Any],
     risk_data: dict[str, Any],
 ) -> list[str]:
+    explicit_questions = _safe_list(analysis_data.get("clarifying_questions"))
     questions: list[str] = []
 
-    if analysis_data.get("has_object_scheme") is False or analysis_data.get("missing_object_scheme") is True:
-        questions.append("Просим предоставить схему объекта или план размещения оборудования.")
+    for question in explicit_questions:
+        text = _safe_str(question)
+        if text and text not in questions:
+            questions.append(text)
 
-    if analysis_data.get("has_installation_points") is False or analysis_data.get("missing_installation_points") is True:
+    if questions:
+        return questions
+
+    documentation = _safe_dict(analysis_data.get("documentation_completeness"))
+    if documentation.get("has_architecture_scheme") == "no" or analysis_data.get("has_object_scheme") is False:
+        questions.append("Просим предоставить схему объекта или архитектуру решения.")
+
+    if documentation.get("has_object_plan") == "no":
+        questions.append("Просим предоставить план объекта с привязкой зон монтажа.")
+
+    if documentation.get("has_installation_points") == "no" or analysis_data.get("has_installation_points") is False:
         questions.append("Просим предоставить перечень и точное расположение точек установки оборудования.")
+
+    if documentation.get("has_cable_routes") == "no":
+        questions.append("Просим предоставить маршруты кабельных трасс и сведения по кабельной инфраструктуре.")
+
+    if documentation.get("has_power_supply_info") == "no":
+        questions.append("Просим уточнить параметры электропитания и резервирования для оборудования.")
+
+    if documentation.get("has_existing_infrastructure_info") == "no":
+        questions.append("Просим описать существующую инфраструктуру, с которой требуется интеграция или совместимость.")
 
     if analysis_data.get("has_or_equivalent") is False:
         questions.append('Допускается ли поставка аналогичного оборудования по принципу "или эквивалент"?')
@@ -378,12 +587,19 @@ def _build_questions_to_customer(
     if analysis_data.get("manufacturer_authorization_required") is True:
         questions.append("Является ли авторизация производителя обязательной для участия, и какие формы подтверждения допускаются?")
 
+    timeline_assessment = _safe_dict(analysis_data.get("timeline_assessment"))
     timelines = _safe_dict(analysis_data.get("timelines"))
-    if timelines.get("implementation_days") is not None and timelines.get("implementation_days") < 30:
+    implementation_days = timeline_assessment.get("implementation_days")
+    if implementation_days is None:
+        implementation_days = timelines.get("implementation_days")
+    if implementation_days is not None and implementation_days < 30:
         questions.append("Возможно ли увеличение срока реализации проекта или поэтапное внедрение?")
 
-    if len(_safe_list(analysis_data.get("integrations"))) == 0:
+    integrations = analysis_data.get("integrations")
+    if isinstance(integrations, list) and len(_safe_list(integrations)) == 0:
         questions.append("Есть ли требования по интеграции с существующими системами, которые не отражены в документации?")
+    elif isinstance(integrations, dict) and integrations.get("external_systems_required") == "yes":
+        questions.append("Просим уточнить состав внешних систем и формат интеграционного взаимодействия.")
 
     if len(_safe_list(analysis_data.get("certificates"))) == 0:
         questions.append("Требуются ли обязательные сертификаты, лицензии или иные подтверждающие документы?")
@@ -398,12 +614,16 @@ def _build_questions_to_customer(
 
 
 def _build_recommended_action(decision: str, completeness_percent: float) -> str:
+    if decision == "do_not_participate":
+        return "Не рекомендуется участвовать без пересмотра условий и официальных разъяснений заказчика."
     if decision == "risky":
-        return "Перед участием или согласованием рекомендуется направить официальный запрос на разъяснение и провести ручную юридико-техническую экспертизу."
-    if completeness_percent < 70:
-        return "Рекомендуется сначала запросить недостающие документы и уточнения у заказчика."
+        return "Перед участием рекомендуется направить официальный запрос на разъяснение и провести ручную юридико-техническую экспертизу."
+    if decision == "go_with_conditions":
+        return "Участие возможно после получения недостающих документов и подтверждения спорных технических требований."
     if decision == "medium":
         return "Рекомендуется провести дополнительную техническую валидацию спорных требований."
+    if completeness_percent < 70:
+        return "Рекомендуется сначала запросить недостающие документы и уточнения у заказчика."
     return "Можно переходить к детальной технической и коммерческой оценке."
 
 
@@ -415,13 +635,21 @@ def _build_conclusion(
 ) -> dict[str, Any]:
     project_type = _safe_str(analysis_data.get("project_type")) or "проект не классифицирован"
     risk_score = risk_data.get("score", 0)
-    decision = _safe_str(risk_data.get("decision")) or "unknown"
+    risk_decision = _safe_str(risk_data.get("decision")) or "unknown"
     completeness_percent = completeness.get("score_percent", 0)
 
-    if decision == "risky":
+    decision_block = _safe_dict(analysis_data.get("decision"))
+    recommendation = _safe_str(decision_block.get("recommendation")) or risk_decision
+    rationale = _safe_list(decision_block.get("decision_rationale"))
+    go_conditions = _safe_list(decision_block.get("go_conditions"))
+    blocking_issues = _safe_list(decision_block.get("blocking_issues"))
+
+    if recommendation == "do_not_participate":
+        verdict = "Документация содержит существенные ограничивающие условия; участие без пересмотра условий не рекомендуется."
+    elif recommendation == "risky":
         verdict = "Документация содержит существенные признаки ограничивающих условий и требует дополнительной проверки."
-    elif decision == "medium":
-        verdict = "Документация содержит отдельные спорные условия и требует уточнений перед принятием решения."
+    elif recommendation in {"go_with_conditions", "medium"}:
+        verdict = "Участие возможно после получения уточнений и закрытия критичных неопределенностей."
     else:
         verdict = "Существенных критических ограничений по текущим данным не выявлено."
 
@@ -429,9 +657,13 @@ def _build_conclusion(
         "verdict": verdict,
         "project_type": project_type,
         "risk_score": risk_score,
-        "risk_decision": decision,
+        "risk_decision": risk_decision,
+        "recommendation": recommendation,
+        "decision_rationale": rationale,
+        "go_conditions": go_conditions,
+        "blocking_issues": blocking_issues,
         "documentation_completeness_percent": completeness_percent,
-        "recommended_action": _build_recommended_action(decision, completeness_percent),
+        "recommended_action": _build_recommended_action(recommendation, completeness_percent),
         "final_note": f'Тендер "{_safe_str(tender_data.get("title")) or "Без названия"}" требует экспертной верификации перед финальным выводом.',
     }
 

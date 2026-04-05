@@ -7,7 +7,7 @@ import os
 import re
 import time
 import unicodedata
-from typing import Any
+from typing import Any, Literal
 
 import requests
 from openai import (
@@ -129,6 +129,59 @@ class TimelineInfo(BaseModel):
                 return value
         return value
 
+PresenceStatus = Literal["yes", "no", "unknown"]
+RiskLevel = Literal["low", "medium", "high"]
+Recommendation = Literal["go", "go_with_conditions", "risky", "do_not_participate"]
+
+
+class DocumentationCompleteness(BaseModel):
+    enough_data_for_estimation: PresenceStatus = "unknown"
+    has_architecture_scheme: PresenceStatus = "unknown"
+    has_object_plan: PresenceStatus = "unknown"
+    has_installation_points: PresenceStatus = "unknown"
+    has_cable_routes: PresenceStatus = "unknown"
+    has_power_supply_info: PresenceStatus = "unknown"
+    has_existing_infrastructure_info: PresenceStatus = "unknown"
+    missing_information: list[str] = Field(default_factory=list)
+    completeness_comment: str | None = None
+
+
+class TailoringAnalysis(BaseModel):
+    specific_vendor_detected: PresenceStatus = "unknown"
+    specific_models_detected: list[str] = Field(default_factory=list)
+    or_equivalent_missing: PresenceStatus = "unknown"
+    manufacturer_authorization_required: PresenceStatus = "unknown"
+    partner_status_required: PresenceStatus = "unknown"
+    unique_characteristics_detected: PresenceStatus = "unknown"
+    tailoring_signs: list[str] = Field(default_factory=list)
+    tailoring_probability: RiskLevel | None = None
+    tailoring_comment: str | None = None
+
+
+class TimelineAssessment(BaseModel):
+    implementation_days: int | None = Field(default=None, ge=0)
+    delivery_days_estimate: int | None = Field(default=None, ge=0)
+    timeline_matches_scope: PresenceStatus = "unknown"
+    delivery_exceeds_project_timeline: PresenceStatus = "unknown"
+    requires_site_survey: PresenceStatus = "unknown"
+    timeline_risk_level: RiskLevel | None = None
+    timeline_comment: str | None = None
+
+
+class TechnicalFeasibility(BaseModel):
+    is_technically_feasible: PresenceStatus = "unknown"
+    requires_additional_design: PresenceStatus = "unknown"
+    requires_nonstandard_architecture: PresenceStatus = "unknown"
+    depends_on_external_systems: PresenceStatus = "unknown"
+    critical_technical_risks: list[str] = Field(default_factory=list)
+    technical_comment: str | None = None
+
+
+class DecisionInfo(BaseModel):
+    recommendation: Recommendation | None = None
+    decision_rationale: list[str] = Field(default_factory=list)
+    go_conditions: list[str] = Field(default_factory=list)
+    blocking_issues: list[str] = Field(default_factory=list)
 
 class TenderAnalysisResult(BaseModel):
     project_type: str | None = None
@@ -147,6 +200,15 @@ class TenderAnalysisResult(BaseModel):
     has_object_scheme: bool | None = None
     has_installation_points: bool | None = None
     specific_model_detected: bool | None = None
+
+    # new v2 blocks
+    documentation_completeness: DocumentationCompleteness = Field(default_factory=DocumentationCompleteness)
+    tailoring_analysis: TailoringAnalysis = Field(default_factory=TailoringAnalysis)
+    timeline_assessment: TimelineAssessment = Field(default_factory=TimelineAssessment)
+    technical_feasibility: TechnicalFeasibility = Field(default_factory=TechnicalFeasibility)
+    clarifying_questions: list[str] = Field(default_factory=list)
+    decision: DecisionInfo = Field(default_factory=DecisionInfo)
+    scoring_inputs: dict[str, bool] = Field(default_factory=dict)
 
     @field_validator(
         "has_or_equivalent",
@@ -503,10 +565,32 @@ class OpenAIAnalyzer:
         return any(marker in message for marker in rate_limit_markers)
 
     def _build_prompt(self, prepared_payload: dict[str, Any]) -> str:
+        document_text = prepared_payload.get("document_text") or ""
+        sections = prepared_payload.get("sections") or []
+        metadata = prepared_payload.get("metadata") or {}
+
+        section_texts: list[str] = []
+        for section in sections:
+            if isinstance(section, dict):
+                heading = str(section.get("heading") or "").strip()
+                content = str(section.get("content") or "").strip()
+                if heading or content:
+                    section_texts.append(f"[SECTION] {heading}\n{content}".strip())
+
+        joined_sections = "\n\n".join(section_texts[:30])
+
         return f"""
 Extract data from tender documentation and return ONE valid JSON object only.
 
-Return JSON with exactly these fields:
+You are acting as:
+- senior tender analyst
+- presales engineer
+- technical bid reviewer
+
+Your task is not only extraction, but also evaluation.
+
+Return JSON with:
+1. current legacy fields:
 - project_type
 - equipment
 - total_device_count
@@ -524,31 +608,102 @@ Return JSON with exactly these fields:
 - has_installation_points
 - specific_model_detected
 
-Strict output rules:
-- has_or_equivalent must always be true or false, never null
-- or_equivalent_evidence must always be an array, never null
-- timelines must always be an object:
-  {{
-    "raw_text": null,
-    "implementation_days": null,
-    "delivery_deadline": null,
-    "notes": []
-  }}
-- integrations must always be an array of objects:
-  [{{"name": "string", "details": null}}]
-- certificates must always be an array of objects:
-  [{{"name": "string", "required_for": null}}]
-- extracted_languages must always be an array
-- assumptions must always be an array
-- warnings must always be an array
-- Do not wrap JSON in markdown
-- Do not add explanations before or after JSON
-- Use null only where a nullable scalar is expected
-- Return JSON only
+2. new analytical blocks:
+- documentation_completeness
+- tailoring_analysis
+- timeline_assessment
+- technical_feasibility
+- clarifying_questions
+- decision
+- scoring_inputs
 
-Source:
-{json.dumps(prepared_payload, ensure_ascii=False, allow_nan=False)}
-        """.strip()
+Rules:
+- use only facts that are present in the document
+- if something is unclear, use "unknown"
+- do not invent vendor names, deadlines, certificates, integrations, budgets or experience
+- if you are unsure, put that into assumptions
+- if document is incomplete, reflect that in documentation_completeness.missing_information
+- clarifying_questions must be practical questions to the customer
+- decision.recommendation must be one of:
+  go / go_with_conditions / risky / do_not_participate
+
+How to fill the new blocks:
+
+documentation_completeness:
+- enough_data_for_estimation
+- has_architecture_scheme
+- has_object_plan
+- has_installation_points
+- has_cable_routes
+- has_power_supply_info
+- has_existing_infrastructure_info
+- missing_information
+- completeness_comment
+
+tailoring_analysis:
+- specific_vendor_detected
+- specific_models_detected
+- or_equivalent_missing
+- manufacturer_authorization_required
+- partner_status_required
+- unique_characteristics_detected
+- tailoring_signs
+- tailoring_probability
+- tailoring_comment
+
+timeline_assessment:
+- implementation_days
+- delivery_days_estimate
+- timeline_matches_scope
+- delivery_exceeds_project_timeline
+- requires_site_survey
+- timeline_risk_level
+- timeline_comment
+
+technical_feasibility:
+- is_technically_feasible
+- requires_additional_design
+- requires_nonstandard_architecture
+- depends_on_external_systems
+- critical_technical_risks
+- technical_comment
+
+decision:
+- recommendation
+- decision_rationale
+- go_conditions
+- blocking_issues
+
+scoring_inputs:
+Set boolean flags for:
+- specific_model_equipment
+- no_or_equivalent
+- manufacturer_authorization_required
+- partner_status_required
+- unique_characteristics_detected
+- implementation_lt_30_days
+- timeline_not_matching_scope
+- delivery_gt_project_timeline
+- no_architecture_or_scheme
+- no_object_plan
+- no_installation_points
+- no_cable_routes
+- unique_experience_required
+- specific_project_experience_required
+- specific_vendor_experience_required
+- external_system_integrations
+- nonstandard_architecture
+- site_survey_required
+
+Metadata:
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+Document text:
+{document_text[:120000]}
+
+Sections:
+{joined_sections[:40000]}
+""".strip()
 
     @staticmethod
     def _sanitize_text(value: Any, *, max_len: int | None = None) -> str:
@@ -1105,7 +1260,7 @@ Source:
         ]
         warnings.extend(errors[:5])
 
-        return {
+        legacy_result = {
             "project_type": None,
             "equipment": [],
             "total_device_count": None,
@@ -1129,7 +1284,55 @@ Source:
             "has_object_scheme": has_object_scheme,
             "has_installation_points": has_installation_points,
             "specific_model_detected": specific_model_detected,
+            "documentation_completeness": {
+                "enough_data_for_estimation": "unknown",
+                "has_architecture_scheme": "yes" if has_object_scheme else "unknown",
+                "has_object_plan": "yes" if has_object_scheme else "unknown",
+                "has_installation_points": "yes" if has_installation_points else "unknown",
+                "has_cable_routes": "unknown",
+                "has_power_supply_info": "unknown",
+                "has_existing_infrastructure_info": "unknown",
+                "missing_information": [],
+                "completeness_comment": "Fallback heuristic result.",
+            },
+            "tailoring_analysis": {
+                "specific_vendor_detected": "unknown",
+                "specific_models_detected": [],
+                "or_equivalent_missing": "yes" if not has_or_equivalent else "no",
+                "manufacturer_authorization_required": "yes" if manufacturer_auth else "unknown",
+                "partner_status_required": "unknown",
+                "unique_characteristics_detected": "unknown",
+                "tailoring_signs": [],
+                "tailoring_probability": None,
+                "tailoring_comment": None,
+            },
+            "timeline_assessment": {
+                "implementation_days": implementation_days,
+                "delivery_days_estimate": None,
+                "timeline_matches_scope": "unknown",
+                "delivery_exceeds_project_timeline": "unknown",
+                "requires_site_survey": "unknown",
+                "timeline_risk_level": None,
+                "timeline_comment": None,
+            },
+            "technical_feasibility": {
+                "is_technically_feasible": "unknown",
+                "requires_additional_design": "unknown",
+                "requires_nonstandard_architecture": "unknown",
+                "depends_on_external_systems": "unknown",
+                "critical_technical_risks": [],
+                "technical_comment": None,
+            },
+            "clarifying_questions": [],
+            "decision": {
+                "recommendation": None,
+                "decision_rationale": [],
+                "go_conditions": [],
+                "blocking_issues": [],
+            },
+            "scoring_inputs": {},
         }
+        return legacy_result
 
     @staticmethod
     def _extract_implementation_days(text: str) -> int | None:

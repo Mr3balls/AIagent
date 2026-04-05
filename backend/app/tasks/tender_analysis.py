@@ -321,33 +321,77 @@ def _merge_boolean_flags(doc_results: list[dict[str, Any]], field_name: str) -> 
 
     return any(values)
 
+def _merge_dicts_prefer_meaningful(doc_results: list[dict[str, Any]], field_name: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for item in doc_results:
+        value = item.get(field_name)
+        if not isinstance(value, dict):
+            continue
+        for key, incoming in value.items():
+            if key not in result or result[key] in (None, "", [], {}, "unknown"):
+                result[key] = incoming
+                continue
+
+            current = result[key]
+
+            if isinstance(current, list) and isinstance(incoming, list):
+                merged = current[:]
+                for x in incoming:
+                    if x not in merged:
+                        merged.append(x)
+                result[key] = merged
+            elif current in (None, "", "unknown") and incoming not in (None, "", "unknown"):
+                result[key] = incoming
+    return result
 
 def _build_analysis_summary(aggregated_analysis: dict[str, Any], risk_result: dict[str, Any]) -> str:
     parts: list[str] = []
 
     project_type = _safe_str(aggregated_analysis.get("project_type"))
     if project_type:
-        parts.append(f"Тип проекта: {project_type}.")
+        parts.append(f"Тип проекта: {project_type}")
 
     total_device_count = aggregated_analysis.get("total_device_count")
     if total_device_count is not None:
-        parts.append(f"Общее количество устройств: {total_device_count}.")
+        parts.append(f"Общее количество устройств: {total_device_count}")
 
-    if aggregated_analysis.get("has_or_equivalent") is False:
-        parts.append('Формулировка "или эквивалент" не обнаружена.')
-    elif aggregated_analysis.get("has_or_equivalent") is True:
-        parts.append('Формулировка "или эквивалент" обнаружена.')
+    has_or_equivalent = aggregated_analysis.get("has_or_equivalent")
+    if has_or_equivalent is False:
+        parts.append('Формулировка "или эквивалент" не обнаружена')
+    elif has_or_equivalent is True:
+        parts.append('Формулировка "или эквивалент" обнаружена')
 
-    implementation_days = _safe_dict(aggregated_analysis.get("timelines")).get("implementation_days")
+    timeline_assessment = _safe_dict(aggregated_analysis.get("timeline_assessment"))
+    timelines = _safe_dict(aggregated_analysis.get("timelines"))
+
+    implementation_days = timeline_assessment.get("implementation_days")
+    if implementation_days is None:
+        implementation_days = timelines.get("implementation_days")
+
     if implementation_days is not None:
-        parts.append(f"Минимальный выявленный срок реализации: {implementation_days} дней.")
+        parts.append(f"Срок реализации: {implementation_days} дней")
+
+    tailoring = _safe_dict(aggregated_analysis.get("tailoring_analysis"))
+    tailoring_signs = _safe_list(tailoring.get("tailoring_signs"))
+    if tailoring_signs:
+        parts.append("Признаки заточки: " + "; ".join(map(str, tailoring_signs[:3])))
+
+    completeness = _safe_dict(aggregated_analysis.get("documentation_completeness"))
+    missing_info = _safe_list(completeness.get("missing_information"))
+    if missing_info:
+        parts.append("Недостающие данные: " + ", ".join(map(str, missing_info[:4])))
 
     score = risk_result.get("score")
     decision = _safe_str(risk_result.get("decision"))
     if score is not None and decision:
-        parts.append(f"Risk score: {score}, категория: {decision}.")
+        parts.append(f"Risk score: {score}, категория: {decision}")
 
-    return " ".join(parts).strip()
+    decision_block = _safe_dict(aggregated_analysis.get("decision"))
+    recommendation = _safe_str(decision_block.get("recommendation"))
+    if recommendation:
+        parts.append(f"Рекомендация: {recommendation}")
+
+    return ". ".join(parts).strip() + "."
 
 
 def _aggregate_document_analyses(doc_analyses: list[dict[str, Any]]) -> dict[str, Any]:
