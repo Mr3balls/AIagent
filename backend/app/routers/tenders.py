@@ -4,6 +4,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
+from pathlib import Path
+from fastapi.responses import FileResponse
 
 from app.database import get_db
 from app.models import Tender, User
@@ -75,3 +77,41 @@ def get_tender(
         )
 
     return tender
+
+@router.get("/{tender_id}/report-docx")
+def download_tender_report_docx(
+    tender_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+):
+    stmt = (
+        select(Tender)
+        .where(Tender.id == tender_id, Tender.owner_id == current_user.id)
+    )
+    tender = db.execute(stmt).scalar_one_or_none()
+
+    if tender is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Tender not found",
+        )
+
+    if not tender.report_docx_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="DOCX report has not been generated yet",
+        )
+
+    path = Path(tender.report_docx_path)
+
+    if not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="DOCX report file not found on disk",
+        )
+
+    return FileResponse(
+        path=str(path),
+        filename=tender.report_docx_filename or f"tender_analysis_{tender.id}.docx",
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )

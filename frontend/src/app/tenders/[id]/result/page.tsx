@@ -1,5 +1,6 @@
 "use client";
 
+import { DownloadReportButton } from "@/components/DownloadReportButton";
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -34,6 +35,7 @@ export default function TenderResultPage() {
               <Link href={`/tenders/${tender.id}`} className="button button-secondary">
                 Back to Tender
               </Link>
+              <DownloadReportButton tender={tender} />
             </div>
           ) : null}
         </div>

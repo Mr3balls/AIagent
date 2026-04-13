@@ -88,6 +88,8 @@ class TenderDetail(BaseModel):
     analysis_summary: str | None
     extracted_requirements: dict[str, Any] | None
     report_payload: dict[str, Any] | None
+    report_docx_filename: str | None = None
+    report_docx_generated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
     documents: list[TenderDocumentResponse] = []

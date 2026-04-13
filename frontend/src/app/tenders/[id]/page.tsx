@@ -12,6 +12,7 @@ import { StateMessage } from "@/components/StateMessage";
 import { UploadForm } from "@/components/UploadForm";
 import { useTender } from "@/hooks/useTender";
 import { formatDate, getDocumentLabel, normalizeDocuments } from "@/lib/utils";
+import { DownloadReportButton } from "@/components/DownloadReportButton";
 
 export default function TenderDetailsPage() {
   const params = useParams<{ id: string }>();
@@ -44,6 +45,8 @@ export default function TenderDetailsPage() {
                 <Link href={`/tenders/${tender.id}/result`} className="button button-secondary">
                   Open Result Page
                 </Link>
+
+                <DownloadReportButton tender={tender} />
               </div>
             </div>
 

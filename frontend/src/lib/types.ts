@@ -69,6 +69,11 @@ export interface Tender {
   analysis_summary?: string | null;
   extracted_requirements?: unknown;
   report_payload?: ReportPayload | null;
+
+  report_docx_filename?: string | null;
+  report_docx_generated_at?: string | null;
+
+
   documents?: TenderDocument[];
   created_at?: string;
   updated_at?: string;

@@ -201,3 +201,59 @@ import {
       token,
     );
   }
+
+  export async function downloadTenderReportDocx(
+  tenderId: string,
+  token: string
+): Promise<void> {
+  const headers = new Headers();
+  const authHeaders = buildAuthHeader(token);
+
+  Object.entries(authHeaders).forEach(([key, value]) => {
+    headers.set(key, value);
+  });
+
+  const response = await fetch(getApiUrl(`/api/v1/tenders/${tenderId}/report-docx`), {
+    method: "GET",
+    headers,
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const fallbackMessage = `Request failed with status ${response.status}`;
+    const rawErrorPayload = await response.text();
+
+    if (!rawErrorPayload) {
+      throw new Error(fallbackMessage);
+    }
+
+    try {
+      const parsedPayload = JSON.parse(rawErrorPayload);
+      throw new Error(parseErrorPayload(parsedPayload, fallbackMessage));
+    } catch {
+      throw new Error(parseErrorPayload(rawErrorPayload, fallbackMessage));
+    }
+  }
+
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+
+  const contentDisposition = response.headers.get("Content-Disposition");
+  const utfFilenameMatch = contentDisposition?.match(/filename\*=UTF-8''([^;]+)/i);
+  const plainFilenameMatch = contentDisposition?.match(/filename="?([^"]+)"?/i);
+
+  const filename = decodeURIComponent(
+    utfFilenameMatch?.[1] ||
+      plainFilenameMatch?.[1] ||
+      `tender_analysis_${tenderId}.docx`
+  );
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.URL.revokeObjectURL(url);
+}

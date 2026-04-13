@@ -70,6 +70,13 @@ class Tender(Base):
     analysis_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     extracted_requirements: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     report_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    
+    report_docx_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    report_docx_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    report_docx_generated_at: Mapped[datetime | None] = mapped_column(
+    DateTime(timezone=True),
+    nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

@@ -186,7 +186,7 @@ class DecisionInfo(BaseModel):
 class TenderAnalysisResult(BaseModel):
     project_type: str | None = None
     equipment: list[EquipmentItem] = Field(default_factory=list)
-    total_device_count: int | None = Field(default=None, ge=0)
+    total_device_count: int | None = None
     vendors: list[VendorItem] = Field(default_factory=list)
     has_or_equivalent: bool = False
     or_equivalent_evidence: list[str] = Field(default_factory=list)
@@ -208,7 +208,7 @@ class TenderAnalysisResult(BaseModel):
     technical_feasibility: TechnicalFeasibility = Field(default_factory=TechnicalFeasibility)
     clarifying_questions: list[str] = Field(default_factory=list)
     decision: DecisionInfo = Field(default_factory=DecisionInfo)
-    scoring_inputs: dict[str, bool] = Field(default_factory=dict)
+    scoring_inputs: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator(
         "has_or_equivalent",
@@ -991,13 +991,89 @@ Sections:
                 if text:
                     result.append({"name": text, "confidence": None})
         return result
+    
+    @staticmethod
+    def _to_optional_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.strip().lower().replace(",", ".")
+            if cleaned in {"", "unknown", "n/a", "none", "null", "not specified"}:
+                return None
+            try:
+                return int(float(cleaned))
+            except ValueError:
+                digits = "".join(ch for ch in cleaned if ch.isdigit())
+                if digits:
+                    try:
+                        return int(digits)
+                    except ValueError:
+                        return None
+        return None
+
+
+    @staticmethod
+    def _to_optional_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip().lower().replace(",", ".")
+            if cleaned in {"", "unknown", "n/a", "none", "null", "not specified"}:
+                return None
+            try:
+                return float(cleaned)
+            except ValueError:
+                return None
+        return None
+
+
+    @staticmethod
+    def _to_recommendation(value: Any) -> str | None:
+        if value is None:
+            return None
+
+        text = str(value).strip().lower()
+        if not text:
+            return None
+
+        if text in {"go", "go_with_conditions", "risky", "do_not_participate"}:
+            return text
+
+        if "cannot proceed" in text or "additional information" in text or "clarification" in text:
+            return "go_with_conditions"
+
+        if "do not participate" in text or "not participate" in text:
+            return "do_not_participate"
+
+        if "risky" in text or "high risk" in text:
+            return "risky"
+
+        if "go with conditions" in text:
+            return "go_with_conditions"
+
+        if text == "go":
+            return "go"
+
+        return "go_with_conditions"
 
     @staticmethod
     def _normalize_result_payload(data: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(data)
         normalized.setdefault("project_type", None)
         normalized["equipment"] = OpenAIAnalyzer._to_equipment_list(normalized.get("equipment"))
-        normalized["total_device_count"] = normalized.get("total_device_count")
+        normalized["total_device_count"] = OpenAIAnalyzer._to_optional_int(
+            normalized.get("total_device_count")
+        )
         normalized["vendors"] = OpenAIAnalyzer._to_vendors_list(normalized.get("vendors"))
         normalized["has_or_equivalent"] = OpenAIAnalyzer._to_bool(
             normalized.get("has_or_equivalent"),
@@ -1030,6 +1106,42 @@ Sections:
         normalized["specific_model_detected"] = OpenAIAnalyzer._to_optional_bool(
             normalized.get("specific_model_detected")
         )
+        
+        decision = normalized.get("decision")
+        if isinstance(decision, dict):
+            decision = dict(decision)
+        else:
+            decision = {}
+
+        decision["recommendation"] = OpenAIAnalyzer._to_recommendation(
+            decision.get("recommendation")
+        )
+        decision["decision_rationale"] = OpenAIAnalyzer._to_string_list(
+            decision.get("decision_rationale")
+        )
+        decision["go_conditions"] = OpenAIAnalyzer._to_string_list(
+            decision.get("go_conditions")
+        )
+        decision["blocking_issues"] = OpenAIAnalyzer._to_string_list(
+            decision.get("blocking_issues")
+        )
+        normalized["decision"] = decision
+
+        raw_scoring_inputs = normalized.get("scoring_inputs")
+        if isinstance(raw_scoring_inputs, dict):
+            scoring_inputs = dict(raw_scoring_inputs)
+        else:
+            scoring_inputs = {}
+
+        for key, value in list(scoring_inputs.items()):
+            if key in {"clarity_score", "overall_score"}:
+                scoring_inputs[key] = OpenAIAnalyzer._to_optional_float(value)
+            else:
+                normalized_bool = OpenAIAnalyzer._to_optional_bool(value)
+                scoring_inputs[key] = False if normalized_bool is None else normalized_bool
+
+        normalized["scoring_inputs"] = scoring_inputs
+
         return normalized
 
     def _validate_json(

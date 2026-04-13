@@ -6,6 +6,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from datetime import datetime
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -14,7 +15,8 @@ from app.services.ai_analyzer import AIAnalyzerError, OpenAIAnalyzer
 from app.services.parsers.document_parser import DocumentParser
 from app.services.report_generator import generate_report
 from app.services.risk_engine import calculate_risk_score
-
+from app.services.docx_report_generator import generate_tender_report_docx
+from app.services.professional_report_writer import build_professional_report_context
 
 def _safe_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
@@ -396,6 +398,7 @@ def _build_analysis_summary(aggregated_analysis: dict[str, Any], risk_result: di
 
 def _aggregate_document_analyses(doc_analyses: list[dict[str, Any]]) -> dict[str, Any]:
     equipment = _merge_equipment(doc_analyses)
+
     aggregated = {
         "project_type": _detect_project_type(doc_analyses),
         "equipment": equipment,
@@ -416,13 +419,36 @@ def _aggregate_document_analyses(doc_analyses: list[dict[str, Any]]) -> dict[str
         "has_object_scheme": _merge_boolean_flags(doc_analyses, "has_object_scheme"),
         "has_installation_points": _merge_boolean_flags(doc_analyses, "has_installation_points"),
         "specific_model_detected": _merge_boolean_flags(doc_analyses, "specific_model_detected"),
+
+        # new blocks
+        "documentation_completeness": _merge_dicts_prefer_meaningful(doc_analyses, "documentation_completeness"),
+        "tailoring_analysis": _merge_dicts_prefer_meaningful(doc_analyses, "tailoring_analysis"),
+        "timeline_assessment": _merge_dicts_prefer_meaningful(doc_analyses, "timeline_assessment"),
+        "technical_feasibility": _merge_dicts_prefer_meaningful(doc_analyses, "technical_feasibility"),
     }
 
-    if aggregated["has_object_scheme"] is None:
-        aggregated["has_object_scheme"] = False
+    clarifying_questions: list[str] = []
+    for item in doc_analyses:
+        for question in _safe_list(item.get("clarifying_questions")):
+            text = _safe_str(question)
+            if text and text not in clarifying_questions:
+                clarifying_questions.append(text)
+    aggregated["clarifying_questions"] = clarifying_questions
 
-    if aggregated["has_installation_points"] is None:
-        aggregated["has_installation_points"] = False
+    scoring_inputs: dict[str, bool] = {}
+    for item in doc_analyses:
+        value = item.get("scoring_inputs")
+        if not isinstance(value, dict):
+            continue
+        for key, flag in value.items():
+            if flag is True:
+                scoring_inputs[key] = True
+            elif key not in scoring_inputs:
+                scoring_inputs[key] = bool(flag)
+    aggregated["scoring_inputs"] = scoring_inputs
+
+    decision_block = _merge_dicts_prefer_meaningful(doc_analyses, "decision")
+    aggregated["decision"] = decision_block
 
     return aggregated
 
@@ -522,15 +548,44 @@ def analyze_tender(tender_id: str) -> dict[str, Any]:
             [item["analysis"] for item in per_document_results]
         )
 
-        risk_result = calculate_risk_score(aggregated_analysis)
+        risk_result = calculate_risk_score(
+            aggregated_analysis.get("scoring_inputs") or aggregated_analysis
+        )
 
         tender_payload = _build_tender_payload(tender)
 
+        
+        
         report = generate_report(
             tender_data=tender_payload,
             analysis_data=aggregated_analysis,
             risk_data=risk_result,
         )
+
+        docx_meta: dict[str, Any] | None = None
+
+        try:
+            professional_context = build_professional_report_context(
+                tender_data=tender_payload,
+                report=report,
+                risk=risk_result,
+            )
+            docx_meta = generate_tender_report_docx(
+                tender_id=str(tender.id),
+                context=professional_context,
+            )
+        except Exception as docx_exc:
+            docx_meta = {
+                "error": str(docx_exc),
+            }
+
+        docx_meta_for_payload: dict[str, Any] | None = None
+        if docx_meta is not None:
+            docx_meta_for_payload = dict(docx_meta)
+
+            generated_at_value = docx_meta_for_payload.get("generated_at")
+            if isinstance(generated_at_value, datetime):
+                docx_meta_for_payload["generated_at"] = generated_at_value.isoformat()
 
         tender.status = TenderStatus.ANALYZED
         tender.tender_risk_score = float(risk_result["score"])
@@ -540,7 +595,17 @@ def analyze_tender(tender_id: str) -> dict[str, Any]:
             "report": report,
             "risk": risk_result,
             "documents": per_document_results,
+            "docx": docx_meta_for_payload,
         }
+
+        if docx_meta and "path" in docx_meta:
+            tender.report_docx_path = docx_meta["path"]
+            tender.report_docx_filename = docx_meta["filename"]
+            tender.report_docx_generated_at = docx_meta["generated_at"]
+        else:
+            tender.report_docx_path = None
+            tender.report_docx_filename = None
+            tender.report_docx_generated_at = None
 
         db.add(tender)
         db.commit()
@@ -551,6 +616,7 @@ def analyze_tender(tender_id: str) -> dict[str, Any]:
             "documents_processed": len(per_document_results),
             "risk_score": risk_result["score"],
             "decision": risk_result["decision"],
+            "report_docx_ready": bool(docx_meta and "path" in docx_meta),
         }
 
     except (ValueError, FileNotFoundError, AIAnalyzerError) as exc:
