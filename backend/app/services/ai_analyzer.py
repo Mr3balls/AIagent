@@ -130,7 +130,7 @@ class TimelineInfo(BaseModel):
         return value
 
 PresenceStatus = Literal["yes", "no", "unknown"]
-RiskLevel = Literal["low", "medium", "high"]
+RiskLevel = Literal["low", "medium", "high", "unknown"]
 Recommendation = Literal["go", "go_with_conditions", "risky", "do_not_participate"]
 
 
@@ -1036,6 +1036,32 @@ Sections:
                 return None
         return None
 
+    @staticmethod
+    def _to_presence_status(value: Any) -> str:
+        """Converts bool/str to 'yes'/'no'/'unknown'."""
+        if value is None:
+            return "unknown"
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"yes", "true", "1", "да"}:
+                return "yes"
+            if normalized in {"no", "false", "0", "нет"}:
+                return "no"
+        return "unknown"
+
+    @staticmethod
+    def _to_risk_level(value: Any) -> str | None:
+        """Converts any value to 'low'/'medium'/'high' or None."""
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"low", "medium", "high"}:
+            return text
+        if text in {"unknown", ""}:
+            return None
+        return None
 
     @staticmethod
     def _to_recommendation(value: Any) -> str | None:
@@ -1065,6 +1091,8 @@ Sections:
             return "go"
 
         return "go_with_conditions"
+    
+    
 
     @staticmethod
     def _normalize_result_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -1141,6 +1169,54 @@ Sections:
                 scoring_inputs[key] = False if normalized_bool is None else normalized_bool
 
         normalized["scoring_inputs"] = scoring_inputs
+
+        # --- normalize documentation_completeness ---
+        dc = normalized.get("documentation_completeness")
+        dc = dict(dc) if isinstance(dc, dict) else {}
+        for key in (
+            "enough_data_for_estimation", "has_architecture_scheme", "has_object_plan",
+            "has_installation_points", "has_cable_routes", "has_power_supply_info",
+            "has_existing_infrastructure_info",
+        ):
+            dc[key] = OpenAIAnalyzer._to_presence_status(dc.get(key))
+        dc.setdefault("missing_information", [])
+        dc["missing_information"] = OpenAIAnalyzer._to_string_list(dc["missing_information"])
+        normalized["documentation_completeness"] = dc
+
+        # --- normalize tailoring_analysis ---
+        ta = normalized.get("tailoring_analysis")
+        ta = dict(ta) if isinstance(ta, dict) else {}
+        for key in (
+            "specific_vendor_detected", "or_equivalent_missing",
+            "manufacturer_authorization_required", "partner_status_required",
+            "unique_characteristics_detected",
+        ):
+            ta[key] = OpenAIAnalyzer._to_presence_status(ta.get(key))
+        ta["specific_models_detected"] = OpenAIAnalyzer._to_string_list(ta.get("specific_models_detected"))
+        ta["tailoring_signs"] = OpenAIAnalyzer._to_string_list(ta.get("tailoring_signs"))
+        ta["tailoring_probability"] = OpenAIAnalyzer._to_risk_level(ta.get("tailoring_probability"))
+        normalized["tailoring_analysis"] = ta
+
+        # --- normalize timeline_assessment ---
+        tl = normalized.get("timeline_assessment")
+        tl = dict(tl) if isinstance(tl, dict) else {}
+        tl["implementation_days"] = OpenAIAnalyzer._to_optional_int(tl.get("implementation_days"))
+        tl["delivery_days_estimate"] = OpenAIAnalyzer._to_optional_int(tl.get("delivery_days_estimate"))
+        for key in ("timeline_matches_scope", "delivery_exceeds_project_timeline", "requires_site_survey"):
+            tl[key] = OpenAIAnalyzer._to_presence_status(tl.get(key))
+        tl["timeline_risk_level"] = OpenAIAnalyzer._to_risk_level(tl.get("timeline_risk_level"))
+        normalized["timeline_assessment"] = tl
+
+        # --- normalize technical_feasibility ---
+        tf = normalized.get("technical_feasibility")
+        tf = dict(tf) if isinstance(tf, dict) else {}
+        for key in (
+            "is_technically_feasible", "requires_additional_design",
+            "requires_nonstandard_architecture", "depends_on_external_systems",
+        ):
+            tf[key] = OpenAIAnalyzer._to_presence_status(tf.get(key))
+        tf["critical_technical_risks"] = OpenAIAnalyzer._to_string_list(tf.get("critical_technical_risks"))
+        normalized["technical_feasibility"] = tf    
 
         return normalized
 
