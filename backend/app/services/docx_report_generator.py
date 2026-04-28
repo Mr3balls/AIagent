@@ -57,9 +57,7 @@ def _add_bullets(document: Document, items: list[str]) -> None:
 
 def _format_general_info(context: dict[str, Any]) -> list[str]:
     general = context.get("general_information") or {}
-
     result: list[str] = []
-
     if context.get("title"):
         result.append(f'Наименование проекта: {context["title"]}.')
     if context.get("customer_name"):
@@ -72,7 +70,6 @@ def _format_general_info(context: dict[str, Any]) -> list[str]:
         result.append(f'Срок реализации: {general["implementation_days"]} календарных дней.')
     if general.get("budget"):
         result.append(f'Бюджет: {general["budget"]}.')
-
     return result
 
 
