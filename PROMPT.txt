@@ -1,0 +1,143 @@
+Ты работаешь с проектом AIagent — это веб-приложение для анализа тендерной документации (ТС). 
+Стек: FastAPI + Celery + PostgreSQL + Redis (бэкенд), Next.js (фронтенд), Docker Compose.
+
+Сделай все следующие изменения:
+
+───────────────────────────────────────────
+1. УДАЛИ OLLAMA — оставь только OpenRouter
+───────────────────────────────────────────
+В backend/app/config.py:
+- Удали все поля: ai_provider, ollama_base_url, ollama_model, ollama_timeout_seconds
+- Добавь поля:
+    openai_fallback_models: str = Field(default="")  # через запятую
+    max_input_chars: int = Field(default=40000)
+    max_sections: int = Field(default=20)
+    max_section_chars: int = Field(default=2000)
+    max_output_tokens: int = Field(default=2000)
+    refresh_token_expire_minutes: int = Field(default=43200)
+    cors_origins: str = Field(default="*")
+- Добавь валидатор jwt_secret_key — если пустой или "change_me_super_secret_key" и DEBUG=false, 
+  выбрасывай ValueError с инструкцией сгенерировать ключ
+- Добавь property cors_origins_list и fallback_models_list
+
+В backend/app/services/ai_analyzer.py:
+- Удали весь код связанный с Ollama (_analyze_with_ollama, provider switching)
+- Оставь только OpenAI-compatible путь
+- Исправь КРИТИЧЕСКИЙ баг: текст документа обрезался до 3000 символов (двойное урезание).
+  Теперь должно быть: max_input_chars из settings (40000 по умолчанию)
+- Секции: было 8 штук по 700 символов → стало max_sections (20) по max_section_chars (2000)
+- Добавь max_tokens=settings.max_output_tokens в вызов API (ускоряет ответ)
+- Переведи промпт на русский язык — модель точнее работает с русскими ТС
+- Добавь поддержку fallback моделей из settings.fallback_models_list
+- Добавь HTTP fallback метод если SDK падает
+
+───────────────────────────────────────────
+2. ИСПРАВЬ СИСТЕМУ БАЛЛОВ РИСКА (risk_engine.py)
+───────────────────────────────────────────
+Текущий максимум 95 баллов — неправильно. По ТС документу максимум 230 баллов.
+Добавь ВСЕ недостающие правила с правильными весами:
+
+Блок 1 — Признаки заточки (макс 80):
+  specific_model_equipment: 20 (уже есть)
+  no_or_equivalent: 20 (уже есть)
+  manufacturer_authorization_required: 15 (уже есть)
+  partner_status_required: 15 (ОТСУТСТВУЕТ — добавить)
+  unique_characteristics_detected: 10 (ОТСУТСТВУЕТ — добавить)
+
+Блок 2 — Сроки (макс 55):
+  implementation_lt_30_days: 20 (уже есть)
+  timeline_not_matching_scope: 15 (ОТСУТСТВУЕТ — добавить)
+  delivery_gt_project_timeline: 20 (ОТСУТСТВУЕТ — добавить)
+
+Блок 3 — Неполная документация (макс 40):
+  no_architecture_or_scheme: 10 (было no_object_scheme — переименовать)
+  no_object_plan: 10 (ОТСУТСТВУЕТ — добавить)
+  no_installation_points: 10 (уже есть)
+  no_cable_routes: 10 (ОТСУТСТВУЕТ — добавить)
+
+Блок 4 — Требования к опыту (макс 30):
+  unique_experience_required: 10 (ОТСУТСТВУЕТ — добавить)
+  specific_project_experience_required: 10 (ОТСУТСТВУЕТ — добавить)
+  specific_vendor_experience_required: 10 (ОТСУТСТВУЕТ — добавить)
+
+Блок 5 — Сложность проекта (макс 25):
+  external_system_integrations: 10 (ОТСУТСТВУЕТ — добавить)
+  nonstandard_architecture: 10 (ОТСУТСТВУЕТ — добавить)
+  site_survey_required: 5 (было +10 через wrong mapping — исправить на 5)
+
+Пороги решений (оставить как есть):
+  0-30: go
+  31-70: go_with_conditions
+  71-120: risky
+  120+: do_not_participate
+
+Убери неправильный mapping где разные флаги маппились на одно правило с чужим весом.
+Добавь поле block в каждое правило для группировки в UI.
+
+───────────────────────────────────────────
+3. АВТОРИЗАЦИЯ — добавь refresh tokens
+───────────────────────────────────────────
+В backend/app/security.py:
+- Добавь функцию create_refresh_token(user_id) — срок 30 дней
+- Добавь функцию decode_token(token, expected_type) — проверяет поле "type" в payload
+- В JWT payload добавь поле "type": "access" или "type": "refresh"
+
+В backend/app/routers/auth.py:
+- POST /auth/login теперь возвращает {access_token, refresh_token, token_type}
+- Добавь POST /auth/refresh — принимает {refresh_token}, возвращает новую пару токенов
+- Добавь POST /auth/logout — статус 204, клиентский (токены удаляет клиент)
+
+───────────────────────────────────────────
+4. УЛУЧШИ main.py
+───────────────────────────────────────────
+- Замени module-level Base.metadata.create_all() на lifespan context manager
+- Добавь _startup_checks() — проверяет OPENAI_API_KEY и JWT_SECRET_KEY при старте,
+  логирует ошибки и падает если DEBUG=false и ключи не заданы
+- Добавь глобальный exception handler чтобы стектрейсы не уходили клиенту
+- Настрой CORS через settings.cors_origins_list вместо allow_origins=["*"]
+- GET /health возвращает version и model name
+
+───────────────────────────────────────────
+5. ИСПРАВЬ FRONTEND TypeScript ошибки
+───────────────────────────────────────────
+В frontend/src/lib/api.ts:
+- Измени сигнатуру ВСЕХ функций принимающих token: string на token: string | null
+  (getTenders, getTenderById, createTender, uploadTenderDocuments, 
+   analyzeTender, getMe, downloadTenderReportDocx)
+- Внутренняя функция apiRequest уже принимает string | null — это правильно
+
+───────────────────────────────────────────
+6. СОЗДАЙ НЕДОСТАЮЩИЕ ФАЙЛЫ
+───────────────────────────────────────────
+Создай frontend/Dockerfile:
+  FROM node:20-alpine
+  WORKDIR /app
+  COPY package.json ./
+  RUN npm install
+  COPY . .
+  ENV NEXT_TELEMETRY_DISABLED=1
+  RUN npm run build
+  EXPOSE 3000
+  CMD ["npm", "start"]
+
+Создай backend/.env.example с комментариями для всех переменных:
+  OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_FALLBACK_MODELS,
+  OPENAI_TIMEOUT_SECONDS, MAX_INPUT_CHARS, MAX_SECTIONS, MAX_SECTION_CHARS,
+  MAX_OUTPUT_TOKENS, JWT_SECRET_KEY, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_MINUTES,
+  REFRESH_TOKEN_EXPIRE_MINUTES, CORS_ORIGINS, DEBUG,
+  POSTGRES_*, REDIS_*
+
+Создай/обнови корневой docker-compose.yml:
+  - Сервисы: db (postgres:16-alpine), redis (redis:7-alpine), backend, worker, frontend
+  - Для db и redis добавь healthcheck
+  - backend и worker depends_on db и redis с condition: service_healthy
+  - worker command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+  - backend command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+  - Убери устаревший атрибут version: из файла
+
+───────────────────────────────────────────
+После всех изменений:
+───────────────────────────────────────────
+1. Проверь синтаксис Python файлов: python -m py_compile на каждый изменённый файл
+2. Убедись что нет импортов ollama или ai_provider в коде
+3. Покажи краткое резюме всех изменённых файлов

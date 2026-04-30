@@ -2,14 +2,17 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.schemas import TokenResponse, UserRegister, UserResponse
+from app.schemas import RefreshTokenRequest, TokenResponse, UserRegister, UserResponse
 from app.security import (
     authenticate_user,
     create_access_token,
+    create_refresh_token,
+    decode_token,
     get_current_user,
     get_user_by_email,
     hash_password,
@@ -56,7 +59,40 @@ def login_user(
         )
 
     access_token = create_access_token(user.id)
-    return TokenResponse(access_token=access_token)
+    refresh_token = create_refresh_token(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh_tokens(payload: RefreshTokenRequest, db: Session = Depends(get_db)) -> TokenResponse:
+    token_payload = decode_token(payload.refresh_token, "refresh")
+    user_id = token_payload.get("sub")
+
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+        )
+
+    stmt = select(User).where(User.id == user_id)
+    user = db.execute(stmt).scalar_one_or_none()
+
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found or inactive",
+        )
+
+    access_token = create_access_token(user.id)
+    refresh_token = create_refresh_token(user.id)
+    return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout_user(
+    _current_user: Annotated[User, Depends(get_current_user)],
+) -> None:
+    pass
 
 
 @router.get("/me", response_model=UserResponse)

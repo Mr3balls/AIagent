@@ -1,7 +1,9 @@
 from typing import Annotated
 from uuid import UUID
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,8 @@ from app.models import Tender, TenderDocument, User
 from app.schemas import TenderDocumentResponse, TenderUploadResponse
 from app.security import get_current_user
 from app.services.file_service import FileService
+
+STORAGE_ROOT = Path("storage")
 
 router = APIRouter(prefix="/tenders", tags=["tender-documents"])
 
@@ -83,3 +87,42 @@ def upload_tender_documents(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to upload documents",
         ) from exc
+
+
+@router.get("/{tender_id}/documents/{document_id}/download")
+def download_tender_document(
+    tender_id: UUID,
+    document_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: Annotated[User, Depends(get_current_user)] = None,
+) -> FileResponse:
+    tender = db.execute(
+        select(Tender).where(Tender.id == tender_id, Tender.owner_id == current_user.id)
+    ).scalar_one_or_none()
+
+    if tender is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tender not found")
+
+    document = db.execute(
+        select(TenderDocument).where(
+            TenderDocument.id == document_id,
+            TenderDocument.tender_id == tender_id,
+        )
+    ).scalar_one_or_none()
+
+    if document is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    # file_path может быть абсолютным или относительным
+    path = Path(document.file_path)
+    if not path.is_absolute():
+        path = STORAGE_ROOT / path
+
+    if not path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found on disk")
+
+    return FileResponse(
+        path=str(path),
+        filename=document.original_filename,
+        media_type=document.mime_type or "application/octet-stream",
+    )

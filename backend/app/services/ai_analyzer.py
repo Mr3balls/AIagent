@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
 import time
 import unicodedata
@@ -250,47 +249,33 @@ class OpenAIAnalyzer:
         *,
         model: str | None = None,
         timeout: float | None = None,
-        max_input_chars: int = 6000,
+        max_input_chars: int | None = None,
     ) -> None:
         settings = get_settings()
 
         self.settings = settings
-        self.provider = settings.ai_provider.strip().lower()
-        self.max_input_chars = max_input_chars
+        self.max_input_chars = max_input_chars if max_input_chars is not None else settings.max_input_chars
 
-        if self.provider == "openai":
-            if not settings.openai_api_key:
-                raise AIAnalyzerConfigurationError("OPENAI_API_KEY is not configured")
+        if not settings.openai_api_key:
+            raise AIAnalyzerConfigurationError("OPENAI_API_KEY is not configured")
 
-            client_kwargs: dict[str, Any] = {
-                "api_key": settings.openai_api_key,
-                "base_url": settings.openai_base_url,
-                "timeout": timeout or settings.openai_timeout_seconds,
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.openai_api_key,
+            "base_url": settings.openai_base_url,
+            "timeout": timeout or settings.openai_timeout_seconds,
+        }
+
+        if "openrouter.ai" in settings.openai_base_url:
+            client_kwargs["default_headers"] = {
+                "HTTP-Referer": "http://localhost:3000",
+                "X-OpenRouter-Title": "Tender AI",
             }
 
-            if "openrouter.ai" in settings.openai_base_url:
-                client_kwargs["default_headers"] = {
-                    "HTTP-Referer": "http://localhost:3000",
-                    "X-OpenRouter-Title": "Tender AI",
-                }
-
-            self.client = OpenAI(**client_kwargs)
-            self.model = model or settings.openai_model
-            self.fallback_models = self._load_fallback_models(self.model)
-            self.request_retries = 2
-            self.retry_backoff_seconds = 1.5
-        elif self.provider == "ollama":
-            self.client = None
-            self.model = model or settings.ollama_model
-            self.timeout = timeout or settings.ollama_timeout_seconds
-            self.base_url = settings.ollama_base_url.rstrip("/")
-            self.fallback_models = []
-            self.request_retries = 1
-            self.retry_backoff_seconds = 1.0
-        else:
-            raise AIAnalyzerConfigurationError(
-                f"Unsupported AI_PROVIDER: {settings.ai_provider}"
-            )
+        self.client = OpenAI(**client_kwargs)
+        self.model = model or settings.openai_model
+        self.fallback_models = settings.fallback_models_list
+        self.request_retries = 2
+        self.retry_backoff_seconds = 1.5
 
     def analyze_document(
         self,
@@ -315,15 +300,7 @@ class OpenAIAnalyzer:
         schema = self._json_schema()
 
         try:
-            if self.provider == "openai":
-                raw_json = self._analyze_with_openai(prompt, schema)
-            elif self.provider == "ollama":
-                raw_json = self._analyze_with_ollama(prompt, schema)
-            else:
-                raise AIAnalyzerConfigurationError(
-                    f"Unsupported AI provider: {self.provider}"
-                )
-
+            raw_json = self._analyze_with_openai(prompt, schema)
             validated = self._validate_json(raw_json, source_payload=prepared_payload)
             return validated.model_dump()
         except AIAnalyzerConfigurationError:
@@ -358,6 +335,7 @@ class OpenAIAnalyzer:
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0,
                         response_format={"type": "json_object"},
+                        max_tokens=self.settings.max_output_tokens,
                     )
                     return self._extract_openai_response_text(response)
                 except (RateLimitError, APITimeoutError, APIConnectionError, BadRequestError) as exc:
@@ -408,38 +386,6 @@ class OpenAIAnalyzer:
             "OpenAI-compatible API error: all model attempts failed. " + " | ".join(errors[:8])
         )
 
-
-    def _analyze_with_ollama(self, prompt: str, schema: dict[str, Any]) -> str:
-        url = f"{self.base_url}/api/chat"
-        payload = {
-            "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "format": schema,
-            "options": {"temperature": 0, "num_ctx": 4096},
-            "keep_alive": "10m",
-        }
-
-        try:
-            response = requests.post(url, json=payload, timeout=self.timeout)
-            response.raise_for_status()
-        except requests.Timeout as exc:
-            logger.exception("Ollama request timeout")
-            raise AIAnalyzerError(f"Ollama timeout: {exc}") from exc
-        except requests.RequestException as exc:
-            logger.exception("Ollama request failed")
-            raise AIAnalyzerError(f"Ollama request failed: {exc}") from exc
-
-        try:
-            data = response.json()
-        except ValueError as exc:
-            logger.exception("Ollama returned non-JSON response envelope")
-            raise AIAnalyzerResponseError("Invalid Ollama response envelope") from exc
-
-        content = data.get("message", {}).get("content") if isinstance(data, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            raise AIAnalyzerResponseError("Empty Ollama model response")
-        return content.strip()
 
     def _analyze_with_openai_http_fallback(
         self,
@@ -512,15 +458,6 @@ class OpenAIAnalyzer:
             f"Unexpected OpenAI-compatible API error for model {model_name}: {original_error}. HTTP fallback failed: {last_error}"
         ) from original_error
 
-    def _load_fallback_models(self, primary_model: str) -> list[str]:
-        raw = os.getenv("OPENAI_FALLBACK_MODELS", "")
-        models: list[str] = []
-        for item in raw.split(","):
-            name = item.strip()
-            if name and name != primary_model and name not in models:
-                models.append(name)
-        return models
-
     def _iter_candidate_models(self) -> list[str]:
         result = [self.model]
         for name in self.fallback_models:
@@ -580,128 +517,122 @@ class OpenAIAnalyzer:
         joined_sections = "\n\n".join(section_texts[:30])
 
         return f"""
-Extract data from tender documentation and return ONE valid JSON object only.
+Извлеки данные из тендерной документации и верни ОДИН валидный JSON-объект.
 
-You are acting as:
-- senior tender analyst
-- presales engineer
-- technical bid reviewer
+Ты выступаешь в роли:
+- старшего аналитика тендерной документации
+- пресейл-инженера
+- технического эксперта по оценке заявок
 
-Your task is not only extraction, but also evaluation.
+Твоя задача — не только извлечение данных, но и экспертная оценка.
 
-Return JSON with:
-1. current legacy fields:
-- project_type
-- equipment
-- total_device_count
-- vendors
-- has_or_equivalent
-- or_equivalent_evidence
-- timelines
-- integrations
-- certificates
-- extracted_languages
-- assumptions
-- warnings
-- manufacturer_authorization_required
-- has_object_scheme
-- has_installation_points
-- specific_model_detected
+Верни JSON со следующими полями:
 
-2. new analytical blocks:
-- documentation_completeness
-- tailoring_analysis
-- timeline_assessment
-- technical_feasibility
-- clarifying_questions
-- decision
-- scoring_inputs
+1. Основные поля:
+- project_type — тип проекта
+- equipment — список оборудования (name, quantity, unit, vendor, characteristics, model, exact_model, vendor_model, model_specified)
+- total_device_count — общее количество устройств
+- vendors — список вендоров (name, confidence)
+- has_or_equivalent — есть ли формулировка "или эквивалент"
+- or_equivalent_evidence — цитаты из документа с этой формулировкой
+- timelines — сроки (raw_text, implementation_days, delivery_deadline, notes)
+- integrations — список интеграций (name, details)
+- certificates — требуемые сертификаты/авторизации (name, required_for)
+- extracted_languages — языки документа
+- assumptions — допущения, сделанные при анализе
+- warnings — предупреждения и замечания
+- manufacturer_authorization_required — требуется ли авторизация производителя
+- has_object_scheme — есть ли схема объекта
+- has_installation_points — указаны ли точки установки
+- specific_model_detected — указана ли конкретная модель
 
-Rules:
-- use only facts that are present in the document
-- if something is unclear, use "unknown"
-- do not invent vendor names, deadlines, certificates, integrations, budgets or experience
-- if you are unsure, put that into assumptions
-- if document is incomplete, reflect that in documentation_completeness.missing_information
-- clarifying_questions must be practical questions to the customer
-- decision.recommendation must be one of:
-  go / go_with_conditions / risky / do_not_participate
+2. Аналитические блоки:
 
-How to fill the new blocks:
+documentation_completeness (полнота документации):
+- enough_data_for_estimation — достаточно данных для оценки (yes/no/unknown)
+- has_architecture_scheme — есть схема архитектуры (yes/no/unknown)
+- has_object_plan — есть план объекта (yes/no/unknown)
+- has_installation_points — указаны точки установки (yes/no/unknown)
+- has_cable_routes — указаны кабельные трассы (yes/no/unknown)
+- has_power_supply_info — есть данные об электропитании (yes/no/unknown)
+- has_existing_infrastructure_info — есть данные о существующей инфраструктуре (yes/no/unknown)
+- missing_information — список отсутствующих данных
+- completeness_comment — комментарий
 
-documentation_completeness:
-- enough_data_for_estimation
-- has_architecture_scheme
-- has_object_plan
-- has_installation_points
-- has_cable_routes
-- has_power_supply_info
-- has_existing_infrastructure_info
-- missing_information
-- completeness_comment
+tailoring_analysis (признаки заточки под конкретного поставщика):
+- specific_vendor_detected — обнаружен конкретный вендор (yes/no/unknown)
+- specific_models_detected — список конкретных моделей
+- or_equivalent_missing — отсутствует "или эквивалент" (yes/no/unknown)
+- manufacturer_authorization_required — требуется авторизация производителя (yes/no/unknown)
+- partner_status_required — требуется партнерский статус (yes/no/unknown)
+- unique_characteristics_detected — уникальные характеристики (yes/no/unknown)
+- tailoring_signs — список признаков заточки
+- tailoring_probability — вероятность заточки (low/medium/high)
+- tailoring_comment — комментарий
 
-tailoring_analysis:
-- specific_vendor_detected
-- specific_models_detected
-- or_equivalent_missing
-- manufacturer_authorization_required
-- partner_status_required
-- unique_characteristics_detected
-- tailoring_signs
-- tailoring_probability
-- tailoring_comment
+timeline_assessment (оценка сроков):
+- implementation_days — срок реализации в днях
+- delivery_days_estimate — оценка срока поставки в днях
+- timeline_matches_scope — сроки соответствуют объему работ (yes/no/unknown)
+- delivery_exceeds_project_timeline — срок поставки превышает срок проекта (yes/no/unknown)
+- requires_site_survey — требуется обследование объекта (yes/no/unknown)
+- timeline_risk_level — уровень риска по срокам (low/medium/high)
+- timeline_comment — комментарий
 
-timeline_assessment:
-- implementation_days
-- delivery_days_estimate
-- timeline_matches_scope
-- delivery_exceeds_project_timeline
-- requires_site_survey
-- timeline_risk_level
-- timeline_comment
+technical_feasibility (техническая реализуемость):
+- is_technically_feasible — технически реализуемо (yes/no/unknown)
+- requires_additional_design — требуется дополнительное проектирование (yes/no/unknown)
+- requires_nonstandard_architecture — нестандартная архитектура (yes/no/unknown)
+- depends_on_external_systems — зависит от внешних систем (yes/no/unknown)
+- critical_technical_risks — список критических технических рисков
+- technical_comment — комментарий
 
-technical_feasibility:
-- is_technically_feasible
-- requires_additional_design
-- requires_nonstandard_architecture
-- depends_on_external_systems
-- critical_technical_risks
-- technical_comment
+decision (решение):
+- recommendation — рекомендация: go / go_with_conditions / risky / do_not_participate
+- decision_rationale — обоснование решения
+- go_conditions — условия для участия
+- blocking_issues — блокирующие проблемы
 
-decision:
-- recommendation
-- decision_rationale
-- go_conditions
-- blocking_issues
+scoring_inputs (булевы флаги для расчёта рисков, true/false):
+- specific_model_equipment — указана конкретная модель оборудования
+- no_or_equivalent — отсутствует "или эквивалент"
+- manufacturer_authorization_required — требуется авторизация производителя
+- partner_status_required — требуется партнерский статус
+- unique_characteristics_detected — уникальные технические характеристики
+- implementation_lt_30_days — срок реализации менее 30 дней
+- timeline_not_matching_scope — сроки не соответствуют объему работ
+- delivery_gt_project_timeline — срок поставки превышает срок проекта
+- no_architecture_or_scheme — отсутствует схема архитектуры
+- no_object_plan — отсутствует план объекта
+- no_installation_points — не указаны точки установки
+- no_cable_routes — не указаны кабельные трассы
+- unique_experience_required — требуется уникальный опыт
+- specific_project_experience_required — требуется опыт конкретного проекта
+- specific_vendor_experience_required — требуется опыт с конкретным вендором
+- external_system_integrations — сложные внешние интеграции
+- nonstandard_architecture — нестандартная архитектура
+- site_survey_required — требуется обследование объекта
 
-scoring_inputs:
-Set boolean flags for:
-- specific_model_equipment
-- no_or_equivalent
-- manufacturer_authorization_required
-- partner_status_required
-- unique_characteristics_detected
-- implementation_lt_30_days
-- timeline_not_matching_scope
-- delivery_gt_project_timeline
-- no_architecture_or_scheme
-- no_object_plan
-- no_installation_points
-- no_cable_routes
-- unique_experience_required
-- specific_project_experience_required
-- specific_vendor_experience_required
-- external_system_integrations
-- nonstandard_architecture
-- site_survey_required
+Поддерживаемые языки документов: русский, английский, казахский.
+Документ может быть написан на одном или нескольких из этих языков одновременно.
+Анализируй текст независимо от языка — ключевые термины встречаются на всех трёх.
 
-Metadata:
+Правила:
+- используй только факты из документа
+- если что-то неясно — используй "unknown"
+- не придумывай вендоров, сроки, сертификаты, интеграции, бюджеты или опыт
+- сомнения помещай в assumptions
+- если документ неполный — отражай это в documentation_completeness.missing_information
+- clarifying_questions — практические вопросы заказчику
+- в поле extracted_languages укажи все языки документа: "ru", "en", "kk"
+
+Метаданные:
 {json.dumps(metadata, ensure_ascii=False, indent=2)}
 
-Document text:
+Текст документа:
 {document_text[:120000]}
 
-Sections:
+Разделы:
 {joined_sections[:40000]}
 """.strip()
 
@@ -761,12 +692,12 @@ Sections:
         trimmed_text = self._sanitize_text(document_text, max_len=self.max_input_chars)
 
         compact_sections: list[dict[str, Any]] = []
-        for section in sections[:8]:
+        for section in sections[:self.settings.max_sections]:
             compact_sections.append(
                 {
                     "index": section.get("index"),
                     "title": self._sanitize_text(section.get("title"), max_len=120) or None,
-                    "content": self._sanitize_text(section.get("content"), max_len=700),
+                    "content": self._sanitize_text(section.get("content"), max_len=self.settings.max_section_chars),
                 }
             )
 
@@ -785,7 +716,7 @@ Sections:
 
         return {
             "metadata": self._sanitize_json_compatible(metadata, max_string_len=250),
-            "document_text": trimmed_text[:3000],
+            "document_text": trimmed_text,
             "sections": compact_sections,
             "tables": compact_tables,
         }
@@ -1424,6 +1355,9 @@ Sections:
             languages.append("ru")
         if re.search(r"[a-z]", combined_text, flags=re.IGNORECASE):
             languages.append("en")
+        # Казахские буквы, которых нет в русском алфавите
+        if re.search(r"[әғқңөұүһі]", combined_text, flags=re.IGNORECASE):
+            languages.append("kk")
 
         implementation_days = self._extract_implementation_days(combined_text)
         has_or_equivalent = bool(re.search(r"\bor equivalent\b|\bили эквивалент\b", combined_lower))
@@ -1530,6 +1464,10 @@ Sections:
             r"implementation\s*[:\-]?\s*(\d{1,4})\s+days",
             r"срок\s*[:\-]?\s*(\d{1,4})\s+дн",
             r"в\s*течение\s*(\d{1,4})\s+дн",
+            # Казахский: "X күн ішінде" / "мерзімі X күн"
+            r"(\d{1,4})\s+күн\s+ішінде",
+            r"мерзім[іи]\s*[:\-]?\s*(\d{1,4})\s+күн",
+            r"орындау\s+мерзім[іи]\s*[:\-]?\s*(\d{1,4})",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -1544,7 +1482,10 @@ Sections:
     def _extract_timeline_text(text: str) -> str | None:
         for line in text.splitlines():
             cleaned = line.strip()
-            if cleaned and re.search(r"deadline|срок|calendar days|дней|дн", cleaned, flags=re.IGNORECASE):
+            if cleaned and re.search(
+                r"deadline|срок|calendar days|дней|дн|күн|мерзім",
+                cleaned, flags=re.IGNORECASE,
+            ):
                 return cleaned[:500]
         return None
 
@@ -1553,7 +1494,10 @@ Sections:
         evidence: list[str] = []
         for line in text.splitlines():
             cleaned = line.strip()
-            if cleaned and re.search(r"\bor equivalent\b|\bили эквивалент\b", cleaned, flags=re.IGNORECASE):
+            if cleaned and re.search(
+                r"\bor equivalent\b|\bили эквивалент\b|\bнемесе балама\b|\bнемесе оған балама\b",
+                cleaned, flags=re.IGNORECASE,
+            ):
                 evidence.append(cleaned[:300])
                 if len(evidence) >= 3:
                     break

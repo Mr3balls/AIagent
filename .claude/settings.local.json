@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"C:\\\\Users\\\\User\\\\Desktop\\\\AI agent\" -Recurse -File -Name | Where-Object { $_ -match \"docker-compose|Dockerfile\" })",
+      "Bash(python -m py_compile app/config.py)",
+      "Bash(python -m py_compile app/security.py)",
+      "Bash(python -m py_compile app/routers/auth.py)",
+      "Bash(python -m py_compile app/services/risk_engine.py)",
+      "Bash(python -m py_compile app/services/ai_analyzer.py)"
+    ]
+  }
+}

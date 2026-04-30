@@ -134,7 +134,7 @@ import {
     });
   }
   
-  export async function getMe(token: string): Promise<User> {
+  export async function getMe(token: string | null): Promise<User> {
     return apiRequest<User>(
       "/api/v1/auth/me",
       {
@@ -144,7 +144,7 @@ import {
     );
   }
   
-  export async function createTender(payload: CreateTenderPayload, token: string): Promise<Tender> {
+  export async function createTender(payload: CreateTenderPayload, token: string | null): Promise<Tender> {
     return apiRequest<Tender>(
       "/api/v1/tenders",
       {
@@ -155,7 +155,7 @@ import {
     );
   }
   
-  export async function getTenders(token: string): Promise<Tender[]> {
+  export async function getTenders(token: string | null): Promise<Tender[]> {
     return apiRequest<Tender[]>(
       "/api/v1/tenders",
       {
@@ -165,7 +165,7 @@ import {
     );
   }
   
-  export async function getTenderById(tenderId: string, token: string): Promise<Tender> {
+  export async function getTenderById(tenderId: string, token: string | null): Promise<Tender> {
     return apiRequest<Tender>(
       `/api/v1/tenders/${tenderId}`,
       {
@@ -175,7 +175,7 @@ import {
     );
   }
   
-  export async function uploadTenderDocuments(tenderId: string, files: File[], token: string): Promise<Tender | ApiMessageResponse> {
+  export async function uploadTenderDocuments(tenderId: string, files: File[], token: string | null): Promise<Tender | ApiMessageResponse> {
     const formData = new FormData();
   
     files.forEach((file) => {
@@ -192,7 +192,7 @@ import {
     );
   }
   
-  export async function analyzeTender(tenderId: string, token: string): Promise<Tender | ApiMessageResponse> {
+  export async function analyzeTender(tenderId: string, token: string | null): Promise<Tender | ApiMessageResponse> {
     return apiRequest<Tender | ApiMessageResponse>(
       `/api/v1/tenders/${tenderId}/analyze`,
       {
@@ -202,9 +202,46 @@ import {
     );
   }
 
+  export async function downloadTenderDocument(
+  tenderId: string,
+  documentId: string,
+  filename: string,
+  token: string | null
+): Promise<void> {
+  const headers = new Headers();
+  const authHeaders = buildAuthHeader(token);
+  Object.entries(authHeaders).forEach(([key, value]) => headers.set(key, value));
+
+  const response = await fetch(
+    getApiUrl(`/api/v1/tenders/${tenderId}/documents/${documentId}/download`),
+    { method: "GET", headers, cache: "no-store" }
+  );
+
+  if (!response.ok) {
+    const fallback = `Request failed with status ${response.status}`;
+    const raw = await response.text();
+    if (!raw) throw new Error(fallback);
+    try {
+      throw new Error(parseErrorPayload(JSON.parse(raw), fallback));
+    } catch {
+      throw new Error(parseErrorPayload(raw, fallback));
+    }
+  }
+
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(url);
+}
+
   export async function downloadTenderReportDocx(
   tenderId: string,
-  token: string
+  token: string | null
 ): Promise<void> {
   const headers = new Headers();
   const authHeaders = buildAuthHeader(token);

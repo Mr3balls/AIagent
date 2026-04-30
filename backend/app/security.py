@@ -33,34 +33,50 @@ def create_access_token(user_id: UUID, expires_delta: timedelta | None = None) -
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=settings.access_token_expire_minutes)
     )
-
     payload = {
         "sub": str(user_id),
         "exp": expire,
+        "type": "access",
     }
-
-    token = jwt.encode(
-        payload,
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-    )
-    return token
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-def decode_access_token(token: str) -> dict:
+def create_refresh_token(user_id: UUID) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.refresh_token_expire_minutes)
+    payload = {
+        "sub": str(user_id),
+        "exp": expire,
+        "type": "refresh",
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
+def decode_token(token: str, expected_type: str) -> dict:
     try:
         payload = jwt.decode(
             token,
             settings.jwt_secret_key,
             algorithms=[settings.jwt_algorithm],
         )
-        return payload
     except InvalidTokenError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+    token_type = payload.get("type")
+    if token_type != expected_type:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Expected token type '{expected_type}', got '{token_type}'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+
+def decode_access_token(token: str) -> dict:
+    return decode_token(token, "access")
 
 
 def get_user_by_email(db: Session, email: str) -> User | None:
